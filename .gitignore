@@ -1,0 +1,56 @@
+# Dependencies
+/node_modules
+/vendor
+
+# Environment
+.env
+.env.backup
+.env.*.local
+
+# Storage & Logs
+/storage/*.key
+/storage/app/*
+!/storage/app/.gitkeep
+/storage/framework/cache/*
+!/storage/framework/cache/.gitkeep
+/storage/framework/sessions/*
+!/storage/framework/sessions/.gitkeep
+/storage/framework/views/*
+!/storage/framework/views/.gitkeep
+/storage/logs/*
+!/storage/logs/.gitkeep
+
+# Database
+/database/*.sqlite
+/database/*.sqlite-journal
+
+# Testing
+.phpunit.result.cache
+/coverage
+
+# IDE
+/.idea
+/.vscode
+/.cursor
+
+# Build & Cache
+/public/
+/bootstrap/cache/*
+!/bootstrap/cache/.gitkeep
+
+# Local development
+docker-compose.override.yml
+Homestead.json
+Homestead.yaml
+npm-debug.log
+yarn-error.log
+
+# Temporary files
+/tmp/
+/test.json
+
+# Laravel development server (не нужен для консольного приложения)
+/server.php
+package.json
+webpack.mix.js
+.styleci.yml
