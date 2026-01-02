@@ -131,4 +131,29 @@ php artisan vk:posts-get --owner=-12345678 --from=2024-01-01 --db
 
 **Примечание:** При использовании опции `--db` данные сохраняются в таблицу `vk_posts` без вывода в консоль. Убедитесь, что миграции выполнены (`make migrate`).
 
+---
+
+## `vk:albums-get` - Получение списка фотоальбомов
+
+Получает список фотоальбомов пользователя или сообщества VK с возможностью фильтрации и экспорта данных.
+
+**Использование:**
+```bash
+php artisan vk:albums-get --owner=-12345678
+php artisan vk:albums-get --owner=-12345678 --need-system
+php artisan vk:albums-get --owner=-12345678 --format=json --output=albums.json
+php artisan vk:albums-get --owner=-12345678 --min-size=10
+php artisan vk:albums-get --owner=-12345678 --need-covers --format=csv --output=albums.csv
+```
+
+**Параметры:**
+- `--owner` - ID владельца альбомов (обязательный, отрицательное число для групп)
+- `--format` - Формат вывода: `table`, `json`, `csv` (по умолчанию `table`)
+- `--output` - Путь к файлу для сохранения результатов (опциональный, по умолчанию вывод в stdout)
+- `--need-system` - Включить системные альбомы (с отрицательными ID)
+- `--need-covers` - Получить обложки альбомов (thumb_src)
+- `--min-size` - Минимальное количество фотографий в альбоме для фильтрации
+
+**Примечание:** Системные альбомы (например, "Фотографии со мной") имеют отрицательные ID и не содержат полей `description`, `created`, `updated`. При использовании опции `--need-covers` в ответе API появляется поле `thumb_src` с URL обложки альбома.
+
 
