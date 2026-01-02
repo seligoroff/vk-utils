@@ -25,8 +25,8 @@
 
 ```bash
 # Клонируйте репозиторий
-git clone <repository-url>
-cd seligoroff-vk-utils
+git clone https://github.com/seligoroff/vk-utils.git
+cd vk-utils
 
 # Установите зависимости и настройте проект
 make setup
