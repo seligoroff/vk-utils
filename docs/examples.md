@@ -8,6 +8,14 @@ php artisan vk:check --delay=0.5
 
 # Повторный просмотр без запросов к API
 php artisan vk:check --cached
+
+# Экспорт результатов в различные форматы
+php artisan vk:check --format=json --output=check_results.json
+php artisan vk:check --format=csv --output=check_results.csv
+php artisan vk:check --output=check_report.md  # автоматически Markdown
+
+# Использование кеша с экспортом
+php artisan vk:check --cached --format=markdown --output=daily_report.md
 ```
 
 ## Поиск контента для публикации

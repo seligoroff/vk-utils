@@ -6,14 +6,38 @@
 
 **Использование:**
 ```bash
+# Базовое использование
 php artisan vk:check
+
+# Использование кеша
 php artisan vk:check --cached
+
+# С задержкой между запросами
 php artisan vk:check --delay=1
+
+# Экспорт в JSON
+php artisan vk:check --format=json --output=check_results.json
+
+# Экспорт в CSV
+php artisan vk:check --format=csv --output=check_results.csv
+
+# Автоматическое определение формата по расширению файла
+php artisan vk:check --output=results.json  # автоматически JSON
+php artisan vk:check --output=results.csv  # автоматически CSV
+php artisan vk:check --output=results.md  # автоматически Markdown
+
+# Явное указание Markdown формата
+php artisan vk:check --format=markdown --output=check_report.md
 ```
 
 **Параметры:**
 - `--cached` - использовать кеш из предыдущего запуска (не делать запросы к API)
 - `--delay=0.3` - задержка между запросами в секундах (по умолчанию 0.3)
+- `--format=table` - формат вывода: `table`, `json`, `csv`, `markdown` (по умолчанию `table`)
+- `--output` - путь к файлу для сохранения результатов (опциональный)
+  - При указании расширения `.json`, `.csv`, `.md` или `.markdown` формат определяется автоматически
+  - Если формат `table` и расширение не указано, сохраняется в CSV
+  - При указании расширения `.md` или `.markdown` автоматически используется Markdown формат с таблицами
 
 **Примечание:** Результаты кешируются в таблице `vk_check_cache` базы данных для быстрого повторного просмотра.
 
