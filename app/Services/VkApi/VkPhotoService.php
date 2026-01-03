@@ -64,3 +64,4 @@ class VkPhotoService extends VkApiClient
     }
 }
 
+

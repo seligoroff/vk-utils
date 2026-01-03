@@ -265,5 +265,218 @@ class GetPostsDatabaseTest extends TestCase
         // БД должна остаться пустой
         $this->assertDatabaseCount('vk_posts', 0);
     }
+
+    /**
+     * Тест очистки постов только указанного владельца (--clear)
+     */
+    public function test_clear_removes_only_specified_owner_posts()
+    {
+        // Сначала создаем посты для двух разных владельцев
+        $posts1 = [
+            $this->createMockPost([
+                'id' => 100,
+                'date' => 1672531200,
+                'text' => 'Пост владельца 1',
+                'likes' => 10,
+            ]),
+        ];
+
+        $posts2 = [
+            $this->createMockPost([
+                'id' => 200,
+                'date' => 1672531200,
+                'text' => 'Пост владельца 2',
+                'likes' => 20,
+            ]),
+        ];
+
+        // Сохраняем посты первого владельца
+        Http::fake([
+            'https://api.vk.com/method/wall.get*' => Http::sequence()
+                ->push($this->createWallGetResponse($posts1), 200)
+                ->push($this->createWallGetResponse($posts2), 200)
+                ->push($this->createWallGetResponse([
+                    $this->createMockPost([
+                        'id' => 101,
+                        'date' => 1672531200,
+                        'text' => 'Новый пост владельца 1',
+                        'likes' => 15,
+                    ]),
+                ]), 200),
+        ]);
+
+        $this->artisan('vk:posts-get', [
+            '--owner' => '-11111111',
+            '--from' => '2023-01-01',
+            '--to' => '2023-01-02',
+            '--db' => true,
+        ])->assertExitCode(0);
+
+        // Сохраняем посты второго владельца
+        $this->artisan('vk:posts-get', [
+            '--owner' => '-22222222',
+            '--from' => '2023-01-01',
+            '--to' => '2023-01-02',
+            '--db' => true,
+        ])->assertExitCode(0);
+
+        // Проверяем, что оба поста сохранены
+        $this->assertDatabaseCount('vk_posts', 2);
+        $this->assertDatabaseHas('vk_posts', ['owner_id' => '-11111111', 'post_id' => 100]);
+        $this->assertDatabaseHas('vk_posts', ['owner_id' => '-22222222', 'post_id' => 200]);
+
+        // Очищаем посты только первого владельца
+        $this->artisan('vk:posts-get', [
+            '--owner' => '-11111111',
+            '--from' => '2023-01-01',
+            '--to' => '2023-01-02',
+            '--db' => true,
+            '--clear' => true,
+        ])->assertExitCode(0);
+
+        // Проверяем, что пост первого владельца удален и заменен новым
+        // А пост второго владельца остался нетронутым
+        $this->assertDatabaseCount('vk_posts', 2);
+        $this->assertDatabaseHas('vk_posts', ['owner_id' => '-11111111', 'post_id' => 101]);
+        $this->assertDatabaseMissing('vk_posts', ['owner_id' => '-11111111', 'post_id' => 100]);
+        $this->assertDatabaseHas('vk_posts', ['owner_id' => '-22222222', 'post_id' => 200]);
+    }
+
+    /**
+     * Тест обновления существующих записей (--update)
+     */
+    public function test_update_updates_existing_posts()
+    {
+        $posts = [
+            $this->createMockPost([
+                'id' => 300,
+                'date' => 1672531200,
+                'text' => 'Исходный пост',
+                'likes' => 10,
+                'reposts' => 5,
+                'comments' => 3,
+            ]),
+        ];
+
+        $updatedPosts = [
+            $this->createMockPost([
+                'id' => 300,
+                'date' => 1672531200,
+                'text' => 'Обновленный пост',
+                'likes' => 25,
+                'reposts' => 10,
+                'comments' => 7,
+            ]),
+        ];
+
+        Http::fake([
+            'https://api.vk.com/method/wall.get*' => Http::sequence()
+                ->push($this->createWallGetResponse($posts), 200)
+                ->push($this->createWallGetResponse($updatedPosts), 200),
+        ]);
+
+        // Первое сохранение
+        $this->artisan('vk:posts-get', [
+            '--owner' => '-12345678',
+            '--from' => '2023-01-01',
+            '--to' => '2023-01-02',
+            '--db' => true,
+        ])->assertExitCode(0);
+
+        $this->assertDatabaseHas('vk_posts', [
+            'post_id' => 300,
+            'owner_id' => '-12345678',
+            'text' => 'Исходный пост',
+            'likes' => 10,
+            'reposts' => 5,
+            'comments' => 3,
+        ]);
+
+        // Обновляем пост с новыми данными
+        $this->artisan('vk:posts-get', [
+            '--owner' => '-12345678',
+            '--from' => '2023-01-01',
+            '--to' => '2023-01-02',
+            '--db' => true,
+            '--update' => true,
+        ])->assertExitCode(0);
+
+        // Проверяем, что запись обновлена, а не создана дубликат
+        $this->assertDatabaseCount('vk_posts', 1);
+        $this->assertDatabaseHas('vk_posts', [
+            'post_id' => 300,
+            'owner_id' => '-12345678',
+            'text' => 'Обновленный пост',
+            'likes' => 25,
+            'reposts' => 10,
+            'comments' => 7,
+        ]);
+    }
+
+    /**
+     * Тест обновления существующих и добавления новых постов (--update)
+     */
+    public function test_update_adds_new_and_updates_existing_posts()
+    {
+        $initialPosts = [
+            $this->createMockPost([
+                'id' => 400,
+                'date' => 1672531200,
+                'text' => 'Существующий пост',
+                'likes' => 10,
+            ]),
+        ];
+
+        $updatedPosts = [
+            $this->createMockPost([
+                'id' => 400,
+                'date' => 1672531200,
+                'text' => 'Обновленный существующий пост',
+                'likes' => 20,
+            ]),
+            $this->createMockPost([
+                'id' => 401,
+                'date' => 1672531200,
+                'text' => 'Новый пост',
+                'likes' => 15,
+            ]),
+        ];
+
+        Http::fake([
+            'https://api.vk.com/method/wall.get*' => Http::sequence()
+                ->push($this->createWallGetResponse($initialPosts), 200)
+                ->push($this->createWallGetResponse($updatedPosts), 200),
+        ]);
+
+        // Первое сохранение
+        $this->artisan('vk:posts-get', [
+            '--owner' => '-12345678',
+            '--from' => '2023-01-01',
+            '--to' => '2023-01-02',
+            '--db' => true,
+        ])->assertExitCode(0);
+
+        // Обновляем существующий и добавляем новый
+        $this->artisan('vk:posts-get', [
+            '--owner' => '-12345678',
+            '--from' => '2023-01-01',
+            '--to' => '2023-01-02',
+            '--db' => true,
+            '--update' => true,
+        ])->assertExitCode(0);
+
+        // Проверяем, что оба поста есть в БД
+        $this->assertDatabaseCount('vk_posts', 2);
+        $this->assertDatabaseHas('vk_posts', [
+            'post_id' => 400,
+            'text' => 'Обновленный существующий пост',
+            'likes' => 20,
+        ]);
+        $this->assertDatabaseHas('vk_posts', [
+            'post_id' => 401,
+            'text' => 'Новый пост',
+            'likes' => 15,
+        ]);
+    }
 }
 

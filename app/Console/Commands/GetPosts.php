@@ -23,6 +23,8 @@ class GetPosts extends Command
                             {--format=table : Формат вывода: table, json, csv}
                             {--output= : Путь к файлу для сохранения результатов (опциональный)}
                             {--db : Сохранить результаты в SQLite базу данных (вместо файла)}
+                            {--update : Обновить существующие записи в БД (только с --db)}
+                            {--clear : Очистить таблицу перед вставкой (только с --db)}
                             {--with-text-only : Показывать только посты с текстом}
                             {--min-likes= : Минимальное количество лайков}
                             {--min-reposts= : Минимальное количество репостов}';
@@ -73,6 +75,11 @@ class GetPosts extends Command
         if (!in_array($format, ['table', 'json', 'csv'])) {
             $this->error('Неверный формат. Допустимые значения: table, json, csv');
             return 1;
+        }
+
+        // Очистка таблицы перед получением постов (если указана опция --clear)
+        if ($this->option('db') && $this->option('clear')) {
+            $this->clearDatabase();
         }
 
         // Получение постов
@@ -429,6 +436,25 @@ class GetPosts extends Command
     }
 
     /**
+     * Очистка таблицы vk_posts для указанного владельца
+     *
+     * @return void
+     */
+    private function clearDatabase(): void
+    {
+        if (!Schema::hasTable('vk_posts')) {
+            return;
+        }
+
+        $ownerId = (string)$this->option('owner');
+        $deleted = DB::table('vk_posts')
+            ->where('owner_id', $ownerId)
+            ->delete();
+        
+        $this->info("Очищено постов владельца {$ownerId}: {$deleted}");
+    }
+
+    /**
      * Сохранение постов в SQLite базу данных
      *
      * @param array $posts
@@ -450,7 +476,9 @@ class GetPosts extends Command
         $this->info("Сохранение " . count($posts) . " постов в базу данных...");
         
         $saved = 0;
+        $updated = 0;
         $skipped = 0;
+        $updateMode = $this->option('update');
         $progressBar = $this->output->createProgressBar(count($posts));
         $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%%');
         $progressBar->start();
@@ -458,28 +486,48 @@ class GetPosts extends Command
         try {
             foreach ($posts as $post) {
                 try {
-                    $exists = DB::table('vk_posts')
-                        ->where('owner_id', (string)$this->option('owner'))
-                        ->where('post_id', $post->id ?? null)
-                        ->exists();
+                    $postData = [
+                        'post_id' => $post->id ?? null,
+                        'owner_id' => (string)$this->option('owner'),
+                        'timestamp' => $post->date ?? 0,
+                        'date' => Carbon::createFromTimestamp($post->date ?? 0)->toDateTimeString(),
+                        'text' => $post->text ?? null,
+                        'likes' => $post->likes->count ?? 0,
+                        'reposts' => $post->reposts->count ?? 0,
+                        'comments' => $post->comments->count ?? 0,
+                        'url' => VkUrlBuilder::wallPost($this->option('owner'), $post->id),
+                        'updated_at' => Carbon::now(),
+                    ];
                     
-                    if (!$exists) {
-                        DB::table('vk_posts')->insert([
-                            'post_id' => $post->id ?? null,
-                            'owner_id' => (string)$this->option('owner'),
-                            'timestamp' => $post->date ?? 0,
-                            'date' => Carbon::createFromTimestamp($post->date ?? 0)->toDateTimeString(),
-                            'text' => $post->text ?? null,
-                            'likes' => $post->likes->count ?? 0,
-                            'reposts' => $post->reposts->count ?? 0,
-                            'comments' => $post->comments->count ?? 0,
-                            'url' => VkUrlBuilder::wallPost($this->option('owner'), $post->id),
-                            'created_at' => Carbon::now(),
-                            'updated_at' => Carbon::now(),
-                        ]);
-                        $saved++;
+                    if ($updateMode) {
+                        // Режим обновления: обновляем существующие, вставляем новые
+                        $updatedCount = DB::table('vk_posts')
+                            ->where('owner_id', (string)$this->option('owner'))
+                            ->where('post_id', $post->id ?? null)
+                            ->update($postData);
+                        
+                        if ($updatedCount > 0) {
+                            $updated++;
+                        } else {
+                            // Если не обновили, значит записи нет - вставляем
+                            $postData['created_at'] = Carbon::now();
+                            DB::table('vk_posts')->insert($postData);
+                            $saved++;
+                        }
                     } else {
-                        $skipped++;
+                        // Режим по умолчанию: только вставка новых записей
+                        $exists = DB::table('vk_posts')
+                            ->where('owner_id', (string)$this->option('owner'))
+                            ->where('post_id', $post->id ?? null)
+                            ->exists();
+                        
+                        if (!$exists) {
+                            $postData['created_at'] = Carbon::now();
+                            DB::table('vk_posts')->insert($postData);
+                            $saved++;
+                        } else {
+                            $skipped++;
+                        }
                     }
                 } catch (\Exception $e) {
                     $skipped++;
@@ -493,7 +541,12 @@ class GetPosts extends Command
             
             $progressBar->finish();
             $this->newLine();
-            $this->info("Сохранено постов: {$saved}, пропущено (дубли): {$skipped}");
+            
+            if ($updateMode) {
+                $this->info("Сохранено новых постов: {$saved}, обновлено существующих: {$updated}, пропущено: {$skipped}");
+            } else {
+                $this->info("Сохранено постов: {$saved}, пропущено (дубли): {$skipped}");
+            }
             
         } catch (\Exception $e) {
             $progressBar->finish();

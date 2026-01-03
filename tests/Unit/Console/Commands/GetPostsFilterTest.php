@@ -175,3 +175,4 @@ class GetPostsFilterTest extends TestCase
     }
 }
 
+

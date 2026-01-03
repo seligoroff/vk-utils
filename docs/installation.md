@@ -61,3 +61,4 @@ VK_ACCOUNT_BASE_URL=https://vk.com
 7. Создайте файл `resources/vk-groups.csv` со списком групп (или используйте `make vk-groups-file`)
 
 
+
