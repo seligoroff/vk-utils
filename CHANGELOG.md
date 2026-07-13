@@ -5,7 +5,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 и проект следует [Semantic Versioning](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [0.9.0] - 2026-07-13
 
 ### Добавлено
 - Классы `App\Support\VkPostPeriod` и `App\Support\VkWallPost` — единая работа с периодом загрузки и сырыми постами стены
