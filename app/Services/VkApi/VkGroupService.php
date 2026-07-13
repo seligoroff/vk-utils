@@ -65,6 +65,32 @@ class VkGroupService
             return null;
         }
     }
+
+    /**
+     * Owner ID for wall API and vk_posts: negative for communities, positive for users.
+     *
+     * @param object $resolved Result of resolveName() with object_id and type
+     * @return string|null
+     */
+    public static function wallOwnerIdFromResolved(object $resolved): ?string
+    {
+        if (!isset($resolved->object_id)) {
+            return null;
+        }
+
+        $id = (int) $resolved->object_id;
+        if ($id === 0) {
+            return null;
+        }
+
+        $type = $resolved->type ?? 'group';
+
+        if ($type === 'user') {
+            return (string) $id;
+        }
+
+        return '-' . abs($id);
+    }
     
     /**
      * Get group information by ID

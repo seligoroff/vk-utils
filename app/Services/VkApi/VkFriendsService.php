@@ -40,6 +40,20 @@ class VkFriendsService
      */
     public function getFriendIds(int $userId, int $count = 5000, int $offset = 0): ?array
     {
+        $result = $this->getFriendIdsWithError($userId, $count, $offset);
+        return $result['friends'];
+    }
+
+    /**
+     * Get friend IDs for a user with error details.
+     *
+     * @param int $userId User ID
+     * @param int $count Number of users to return (max 5000 per API call)
+     * @param int $offset Offset for pagination
+     * @return array{friends:array<int>|null,error:string|null}
+     */
+    public function getFriendIdsWithError(int $userId, int $count = 5000, int $offset = 0): array
+    {
         $adapter = $this->getAdapter();
 
         try {
@@ -55,16 +69,19 @@ class VkFriendsService
             }, "getting friends for user {$userId}");
 
             if (!is_array($result)) {
-                return null;
+                return ['friends' => null, 'error' => 'Unexpected VK response format'];
             }
 
             if (isset($result['items']) && is_array($result['items'])) {
-                return array_values(array_map('intval', $result['items']));
+                return [
+                    'friends' => array_values(array_map('intval', $result['items'])),
+                    'error' => null,
+                ];
             }
 
-            return [];
+            return ['friends' => [], 'error' => null];
         } catch (\Exception $e) {
-            return null;
+            return ['friends' => null, 'error' => $e->getMessage()];
         }
     }
 }

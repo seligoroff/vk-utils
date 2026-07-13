@@ -20,6 +20,7 @@ class LikersCore extends Command
                             {--k=1 : Минимум друзей среди лайкнувших для включения в ядро}
                             {--max-users=300 : Максимум лайкнувших для анализа}
                             {--delay=0.2 : Задержка между запросами friends.get в секундах}
+                            {--verbose-errors : Показать сводку ошибок API при получении друзей}
                             {--format=table : Формат вывода: table, json, csv, markdown}
                             {--output= : Путь к файлу для сохранения результатов}';
 
@@ -37,6 +38,7 @@ class LikersCore extends Command
         $k = (int) $this->option('k');
         $maxUsers = (int) $this->option('max-users');
         $delay = (float) $this->option('delay');
+        $verboseErrors = (bool) $this->option('verbose-errors');
         $format = strtolower((string) $this->option('format'));
 
         if (empty($owner)) {
@@ -87,6 +89,7 @@ class LikersCore extends Command
         $likerSet = array_fill_keys($likers, true);
         $rows = [];
         $friendErrors = 0;
+        $errorStats = [];
 
         $this->info('Анализ дружеских связей...');
         $bar = $this->output->createProgressBar(count($likers));
@@ -95,14 +98,27 @@ class LikersCore extends Command
         $bar->start();
 
         foreach ($likers as $userId) {
-            $friends = $friendsService->getFriendIds((int) $userId);
+            $friendsResult = $friendsService->getFriendIdsWithError((int) $userId);
+            $friends = $friendsResult['friends'];
+            $errorMessage = $friendsResult['error'];
+
             if ($friends === null) {
                 $friendErrors++;
+                $errorKey = $this->normalizeErrorMessage($errorMessage);
+                if (!isset($errorStats[$errorKey])) {
+                    $errorStats[$errorKey] = ['count' => 0, 'users' => []];
+                }
+                $errorStats[$errorKey]['count']++;
+                if (count($errorStats[$errorKey]['users']) < 5) {
+                    $errorStats[$errorKey]['users'][] = (int) $userId;
+                }
+
                 $rows[] = [
                     'user_id' => (int) $userId,
                     'friends_in_likers_count' => 0,
                     'core_member' => false,
                     'friends_data_available' => false,
+                    'error_message' => $errorMessage,
                 ];
             } else {
                 $friendsInLikers = 0;
@@ -116,6 +132,7 @@ class LikersCore extends Command
                     'friends_in_likers_count' => $friendsInLikers,
                     'core_member' => $friendsInLikers >= $k,
                     'friends_data_available' => true,
+                    'error_message' => null,
                 ];
             }
 
@@ -128,6 +145,21 @@ class LikersCore extends Command
         $bar->setMessage('');
         $bar->finish();
         $this->newLine(2);
+
+        if ($verboseErrors && !empty($errorStats)) {
+            $this->warn('Сводка ошибок friends.get:');
+            $errorRows = [];
+            foreach ($errorStats as $error => $meta) {
+                $errorRows[] = [
+                    $error,
+                    $meta['count'],
+                    implode(', ', $meta['users']),
+                ];
+            }
+            usort($errorRows, fn(array $a, array $b) => $b[1] <=> $a[1]);
+            $this->table(['Ошибка', 'Количество', 'Примеры user_id'], $errorRows);
+            $this->newLine();
+        }
 
         usort($rows, fn(array $a, array $b) => $b['friends_in_likers_count'] <=> $a['friends_in_likers_count']);
         $coreUsers = array_values(array_filter($rows, fn(array $r) => $r['core_member']));
@@ -144,6 +176,7 @@ class LikersCore extends Command
                 'analyzed_likers' => count($rows),
                 'core_users_count' => count($coreUsers),
                 'friend_data_errors' => $friendErrors,
+                'friend_error_types' => $this->flattenErrorStats($errorStats),
             ],
             'core_users' => $coreUsers,
             'users' => $rows,
@@ -349,6 +382,39 @@ class LikersCore extends Command
             return $path;
         }
         return base_path($path);
+    }
+
+    /**
+     * @param array<string, array{count:int,users:array<int>}> $errorStats
+     * @return array<int, array{error:string,count:int,sample_users:array<int>}>
+     */
+    private function flattenErrorStats(array $errorStats): array
+    {
+        $result = [];
+        foreach ($errorStats as $error => $meta) {
+            $result[] = [
+                'error' => $error,
+                'count' => $meta['count'],
+                'sample_users' => $meta['users'],
+            ];
+        }
+
+        usort($result, fn(array $a, array $b) => $b['count'] <=> $a['count']);
+        return $result;
+    }
+
+    private function normalizeErrorMessage(?string $errorMessage): string
+    {
+        if ($errorMessage === null || trim($errorMessage) === '') {
+            return 'Unknown error';
+        }
+
+        $message = trim($errorMessage);
+        if (mb_strlen($message) > 180) {
+            $message = mb_substr($message, 0, 180) . '...';
+        }
+
+        return $message;
     }
 
     /**

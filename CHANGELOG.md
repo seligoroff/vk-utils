@@ -5,6 +5,24 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 и проект следует [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Добавлено
+- Классы `App\Support\VkPostPeriod` и `App\Support\VkWallPost` — единая работа с периодом загрузки и сырыми постами стены
+- Опция `--verbose-errors` для `vk:likers-core`: сводка ошибок `friends.get` с типами ошибок и примерами `user_id`
+- Метод `VkFriendsService::getFriendIdsWithError()` для получения списка друзей вместе с деталями ошибки VK API
+- Unit-тесты для новой логики: `VkPostPeriodTest`, `VkWallPostTest`, `GetPostsClearTest`, `PostsGetAllGroupsClearTest`
+
+### Изменено
+- Единая модель периода `VkPostPeriod`: полуинтервал `[from, to)` — `--to=2026-01-01` не включает этот день (весь 2025 при `--from=2025-01-01`)
+- Соседние загрузки (`2025→2026-01-01` и `2026-01-01→2027-01-01`) больше не пересекаются при `--clear`
+- Опция `--clear` в `vk:posts-get` удаляет из `vk_posts` только посты владельца за период `--from`/`--to`, а не все его записи
+- `vk:posts-get-all` при очистке перед вставкой использует ту же логику (период + `owner_id`)
+- `vk:posts-get-all`: allowlist owner_id из `vk-groups.csv`, лог списка и счётчиков удаления; `--no-clear` для загрузки без удаления
+- `VkGroupService::wallOwnerIdFromResolved()` — корректный owner_id для групп (−id) и пользователей (+id)
+- Пагинация `wall.get`: закреплённые посты больше не обрывают загрузку на старых датах
+- `vk:analytics`: развёрнутая диагностика при пустом результате — подсказки по загрузке данных в `vk_posts` и фильтру `--min-engagement`
+
 ## [0.8.0] - 2026-03-01
 
 ### Добавлено

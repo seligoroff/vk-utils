@@ -216,5 +216,55 @@ class VkGroupServiceTest extends TestCase
         // При ошибке API метод вернет null
         $this->assertNull($group);
     }
+
+    /**
+     * Тест получения owner_id для стены группы
+     */
+    public function test_wall_owner_id_is_negative_for_group()
+    {
+        $resolved = (object) ['type' => 'group', 'object_id' => 166471];
+
+        $this->assertSame('-166471', VkGroupService::wallOwnerIdFromResolved($resolved));
+    }
+
+    /**
+     * Тест получения owner_id для стены пользователя
+     */
+    public function test_wall_owner_id_is_positive_for_user()
+    {
+        $resolved = (object) ['type' => 'user', 'object_id' => 12345];
+
+        $this->assertSame('12345', VkGroupService::wallOwnerIdFromResolved($resolved));
+    }
+
+    /**
+     * Тест получения owner_id при отсутствии object_id
+     */
+    public function test_wall_owner_id_returns_null_without_object_id()
+    {
+        $resolved = (object) ['type' => 'group'];
+
+        $this->assertNull(VkGroupService::wallOwnerIdFromResolved($resolved));
+    }
+
+    /**
+     * Тест получения owner_id при нулевом object_id
+     */
+    public function test_wall_owner_id_returns_null_for_zero_object_id()
+    {
+        $resolved = (object) ['type' => 'group', 'object_id' => 0];
+
+        $this->assertNull(VkGroupService::wallOwnerIdFromResolved($resolved));
+    }
+
+    /**
+     * Тест получения owner_id для неизвестного типа (по умолчанию группа)
+     */
+    public function test_wall_owner_id_treats_unknown_type_as_group()
+    {
+        $resolved = (object) ['type' => 'page', 'object_id' => 98765];
+
+        $this->assertSame('-98765', VkGroupService::wallOwnerIdFromResolved($resolved));
+    }
 }
 

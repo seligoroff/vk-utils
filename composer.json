@@ -14,6 +14,8 @@
         "vkcom/vk-php-sdk": "^5.131"
     },
     "require-dev": {
+        "carbonphp/carbon-doctrine-types": "^2.0",
+        "doctrine/dbal": "^3.0",
         "fakerphp/faker": "^1.21",
         "laravel/pint": "^1.0",
         "laravel/sail": "^1.18",

@@ -110,8 +110,7 @@ class Analytics extends Command
         }
         
         if ($posts->isEmpty()) {
-            $this->warn('Посты за указанный период не найдены в базе данных.');
-            $this->info('Используйте команду: php artisan vk:posts-get --owner=' . $ownerId . ' --from=' . $period['from']->format('Y-m-d') . ' --db');
+            $this->explainEmptyPostsResult($ownerId, $period['from'], $period['to'], $minEngagement);
             return 0;
         }
 
@@ -595,6 +594,60 @@ class Analytics extends Command
         }
 
         return $query->orderBy('date', 'desc')->get();
+    }
+
+    /**
+     * Пояснение при пустом результате: analytics не ходит в VK, только в vk_posts.
+     */
+    private function explainEmptyPostsResult(string $ownerId, Carbon $from, Carbon $to, int $minEngagement): void
+    {
+        $fromStr = $from->format('Y-m-d');
+        $toStr = $to->format('Y-m-d');
+        $toOption = $to->isToday() ? '' : ' --to=' . $toStr;
+
+        $this->newLine();
+        $this->warn('Нет постов для аналитики.');
+        $this->newLine();
+        $this->line('  <fg=yellow>Как устроена команда:</> vk:analytics <options=bold>не обращается к VK</> — только к локальной таблице <fg=cyan>vk_posts</>.');
+        $this->line('  Наличие постов на vk.com само по себе не учитывается; нужна предварительная загрузка через vk:posts-get.');
+        $this->newLine();
+
+        $totalForOwner = DB::table('vk_posts')->where('owner_id', $ownerId)->count();
+        $inPeriodCount = DB::table('vk_posts')
+            ->where('owner_id', $ownerId)
+            ->whereBetween('date', [$from->toDateTimeString(), $to->toDateTimeString()])
+            ->count();
+
+        if ($totalForOwner === 0) {
+            $this->line("  <fg=yellow>Диагностика:</> для owner_id=<fg=cyan>{$ownerId}</> в vk_posts записей нет (ни за один период).");
+            $this->line('  Вероятная причина: посты ещё не загружали в БД, или загружали без флага <fg=cyan>--db</> (тогда они остались только в выводе/файле).');
+        } elseif ($inPeriodCount === 0) {
+            $bounds = DB::table('vk_posts')
+                ->where('owner_id', $ownerId)
+                ->selectRaw('MIN(date) as min_date, MAX(date) as max_date')
+                ->first();
+            $this->line("  <fg=yellow>Диагностика:</> для owner_id=<fg=cyan>{$ownerId}</> в БД есть <fg=cyan>{$totalForOwner}</> пост(ов), но в периоде {$fromStr} — {$toStr} — <fg=cyan>0</>.");
+            if ($bounds && $bounds->min_date) {
+                $this->line("  Даты постов в БД: с {$bounds->min_date} по {$bounds->max_date}.");
+            }
+            $this->line('  Вероятная причина: в кэше нет постов за выбранный период — расширьте --period или догрузите диапазон.');
+        } elseif ($minEngagement > 0) {
+            $this->line("  <fg=yellow>Диагностика:</> в периоде {$fromStr} — {$toStr} найдено <fg=cyan>{$inPeriodCount}</> пост(ов),");
+            $this->line("  но все отсечены фильтром <fg=cyan>--min-engagement={$minEngagement}</> (лайки + репосты + комментарии).");
+            $this->line('  Вероятная причина: порог вовлечённости слишком высокий — уменьшите или уберите --min-engagement.');
+        }
+
+        $this->newLine();
+        $onlyEngagementFilter = $totalForOwner > 0 && $inPeriodCount > 0 && $minEngagement > 0;
+
+        if ($onlyEngagementFilter) {
+            $this->line('  <fg=green>Что сделать:</> уменьшите или уберите <fg=cyan>--min-engagement</> и повторите vk:analytics.');
+        } else {
+            $this->line('  <fg=green>Что сделать:</> загрузить посты из VK в БД (флаг <fg=cyan>--db</> обязателен):');
+            $this->line("    <fg=cyan>php artisan vk:posts-get --owner={$ownerId} --from={$fromStr}{$toOption} --db</>");
+            $this->line('  Затем снова запустите vk:analytics с тем же --owner и --period.');
+        }
+        $this->newLine();
     }
 
     /**

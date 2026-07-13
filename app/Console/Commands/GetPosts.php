@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use App\Services\VkApi\VkWallService;
 use App\Services\VkApi\VkUrlBuilder;
+use App\Support\VkPostPeriod;
+use App\Support\VkWallPost;
 
 class GetPosts extends Command
 {
@@ -24,7 +26,7 @@ class GetPosts extends Command
                             {--output= : Путь к файлу для сохранения результатов (опциональный)}
                             {--db : Сохранить результаты в базу данных (вместо файла)}
                             {--update : Обновить существующие записи в БД (только с --db)}
-                            {--clear : Очистить таблицу перед вставкой (только с --db)}
+                            {--clear : Удалить из БД посты владельца за период --from/--to перед вставкой (только с --db)}
                             {--with-text-only : Показывать только посты с текстом}
                             {--min-likes= : Минимальное количество лайков}
                             {--min-reposts= : Минимальное количество репостов}';
@@ -54,19 +56,14 @@ class GetPosts extends Command
             return 1;
         }
 
-        // Парсинг дат
+        // Парсинг периода [from, to): date-only --to не включает указанный день
         try {
-            $fromTimestamp = $this->parseDate($this->option('from'));
-            $toTimestamp = $this->option('to') 
-                ? $this->parseDate($this->option('to'))
-                : time();
+            $period = VkPostPeriod::fromCommandOptions(
+                $this->option('from'),
+                $this->option('to')
+            );
         } catch (\Exception $e) {
             $this->error('Ошибка парсинга даты: ' . $e->getMessage());
-            return 1;
-        }
-
-        if ($fromTimestamp > $toTimestamp) {
-            $this->error('Дата начала периода не может быть больше даты окончания');
             return 1;
         }
 
@@ -77,13 +74,13 @@ class GetPosts extends Command
             return 1;
         }
 
-        // Очистка таблицы перед получением постов (если указана опция --clear)
+        // Очистка постов за период перед получением (если указана опция --clear)
         if ($this->option('db') && $this->option('clear')) {
-            $this->clearDatabase();
+            $this->clearDatabase($period);
         }
 
         // Получение постов
-        $this->info("Получение постов с {$this->formatDate($fromTimestamp)} по {$this->formatDate($toTimestamp)}...");
+        $this->info("Получение постов с {$period->fromLabel()} по {$period->toInclusiveLabel()}...");
         
         $wallService = new VkWallService();
         $wallService->setOwner($this->option('owner'));
@@ -92,6 +89,7 @@ class GetPosts extends Command
         $offset = 0;
         $totalProcessed = 0;
         $progressBar = null;
+        $lastFetchedBatch = [];
 
         try {
             while (true) {
@@ -100,6 +98,8 @@ class GetPosts extends Command
                 if (empty($posts) || !is_array($posts)) {
                     break;
                 }
+
+                $lastFetchedBatch = $posts;
 
                 // Инициализация progress bar при первом запросе
                 if ($progressBar === null && count($posts) > 0) {
@@ -113,19 +113,22 @@ class GetPosts extends Command
                 foreach ($posts as $post) {
                     $totalProcessed++;
                     
-                    // Фильтрация по дате
-                    if (!isset($post->date)) {
+                    $postDate = VkWallPost::timestamp($post);
+                    if ($postDate === null) {
                         continue;
                     }
-                    
-                    // Если пост старше начала периода, прекращаем обработку
-                    // (посты обычно идут от новых к старым)
-                    if ($post->date < $fromTimestamp) {
+
+                    // Закреплённые посты VK возвращает в начале ленты вне хронологии
+                    if (VkWallPost::shouldStopPagination($post, $period->fromInclusive)) {
                         $shouldBreak = true;
                         break;
                     }
-                    
-                    if ($post->date > $toTimestamp) {
+
+                    if ($postDate < $period->fromInclusive) {
+                        continue;
+                    }
+
+                    if ($postDate >= $period->toExclusive) {
                         continue;
                     }
 
@@ -181,6 +184,7 @@ class GetPosts extends Command
 
         if (empty($filteredPosts)) {
             $this->warn('Посты за указанный период не найдены');
+            $this->explainEmptyPostsFromApi($lastFetchedBatch, $period, $totalProcessed);
             return 0;
         }
 
@@ -436,22 +440,71 @@ class GetPosts extends Command
     }
 
     /**
-     * Очистка таблицы vk_posts для указанного владельца
+     * Подсказка, если API вернул посты, но ни один не попал в период.
      *
-     * @return void
+     * @param array<int, object> $lastBatch
      */
-    private function clearDatabase(): void
+    private function explainEmptyPostsFromApi(array $lastBatch, VkPostPeriod $period, int $totalProcessed): void
+    {
+        if (empty($lastBatch)) {
+            $this->line('  API не вернул постов (проверьте --owner и права токена).');
+            return;
+        }
+
+        $timestamps = [];
+        $pinnedOld = 0;
+        foreach ($lastBatch as $post) {
+            $ts = VkWallPost::timestamp($post);
+            if ($ts !== null) {
+                $timestamps[] = $ts;
+            }
+            if (VkWallPost::isPinned($post) && $ts !== null && $ts < $period->fromInclusive) {
+                $pinnedOld++;
+            }
+        }
+
+        if ($timestamps !== []) {
+            $min = min($timestamps);
+            $max = max($timestamps);
+            $this->line(sprintf(
+                '  Первая порция из API (%d шт.): даты с %s по %s; обработано всего: %d.',
+                count($lastBatch),
+                VkWallPost::formatTimestamp($min),
+                VkWallPost::formatTimestamp($max),
+                $totalProcessed
+            ));
+        }
+
+        if ($pinnedOld > 0) {
+            $this->line("  Закреплённых постов старше --from: {$pinnedOld} (VK отдаёт их в начале ленты вне хронологии).");
+        }
+
+        $this->line('  Запрошенный период: ' . $period->fromLabel() . ' — ' . $period->toInclusiveLabel());
+    }
+
+    /**
+     * Очистка постов vk_posts для владельца в пределах периода --from/--to.
+     */
+    private function clearDatabase(VkPostPeriod $period): void
     {
         if (!Schema::hasTable('vk_posts')) {
             return;
         }
 
-        $ownerId = (string)$this->option('owner');
+        $ownerId = (string) $this->option('owner');
         $deleted = DB::table('vk_posts')
             ->where('owner_id', $ownerId)
+            ->where('timestamp', '>=', $period->fromInclusive)
+            ->where('timestamp', '<', $period->toExclusive)
             ->delete();
-        
-        $this->info("Очищено постов владельца {$ownerId}: {$deleted}");
+
+        $this->info(sprintf(
+            'Очищено постов владельца %s за период %s — %s: %d',
+            $ownerId,
+            $period->fromLabel(),
+            $period->toInclusiveLabel(),
+            $deleted
+        ));
     }
 
     /**

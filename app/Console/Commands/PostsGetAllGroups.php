@@ -10,6 +10,8 @@ use App\Services\VkApi\VkWallService;
 use App\Services\VkApi\VkGroupService;
 use App\Services\VkApi\VkUrlBuilder;
 use App\Models\Resource;
+use App\Support\VkPostPeriod;
+use App\Support\VkWallPost;
 
 class PostsGetAllGroups extends Command
 {
@@ -21,7 +23,8 @@ class PostsGetAllGroups extends Command
     protected $signature = 'vk:posts-get-all
                             {--from= : Дата начала периода (обязательный)}
                             {--to= : Дата окончания периода (опциональный, по умолчанию текущая дата)}
-                            {--delay=0.3 : Задержка между запросами к группам в секундах (по умолчанию 0.3)}';
+                            {--delay=0.3 : Задержка между запросами к группам в секундах (по умолчанию 0.3)}
+                            {--no-clear : Не удалять посты в БД перед загрузкой (только добавление без дубликатов)}';
 
     /**
      * The console command description.
@@ -43,19 +46,13 @@ class PostsGetAllGroups extends Command
             return 1;
         }
 
-        // Парсинг дат
         try {
-            $fromTimestamp = $this->parseDate($this->option('from'));
-            $toTimestamp = $this->option('to') 
-                ? $this->parseDate($this->option('to'))
-                : time();
+            $period = VkPostPeriod::fromCommandOptions(
+                $this->option('from'),
+                $this->option('to')
+            );
         } catch (\Exception $e) {
             $this->error('Ошибка парсинга даты: ' . $e->getMessage());
-            return 1;
-        }
-
-        if ($fromTimestamp > $toTimestamp) {
-            $this->error('Дата начала периода не может быть больше даты окончания');
             return 1;
         }
 
@@ -78,48 +75,69 @@ class PostsGetAllGroups extends Command
             return 1;
         }
 
-        $this->info("Обработка " . count($groupList) . " групп...");
-        $this->info("Период: с {$this->formatDate($fromTimestamp)} по {$this->formatDate($toTimestamp)}");
+        $resolvedGroups = $this->resolveGroupsFromList($groupList);
+        $allowedOwnerIds = array_values(array_unique(array_column($resolvedGroups, 'owner_id')));
+
+        if (empty($resolvedGroups)) {
+            $this->error('Не удалось резолвить ни одной записи из vk-groups.csv');
+            return 1;
+        }
+
+        $resolveErrors = count($groupList) - count($resolvedGroups);
+
+        $this->info('Записей в vk-groups.csv: ' . count($groupList) . ', резолвлено: ' . count($resolvedGroups));
+        $this->info("Период: с {$period->fromLabel()} по {$period->toInclusiveLabel()}");
+        $this->newLine();
+        $this->line('Owner_id из конфигурации (очистка БД только для них, только за указанный период):');
+        foreach ($resolvedGroups as $group) {
+            $this->line("  {$group['owner_id']} ← {$group['screen_name']} ({$group['type']})");
+        }
+        $this->line('Посты других owner_id в vk_posts не удаляются.');
+        if ($this->option('no-clear')) {
+            $this->warn('Режим --no-clear: существующие посты в БД не удаляются перед загрузкой.');
+        }
         $this->newLine();
 
         $wallService = new VkWallService();
         $totalProcessed = 0;
         $totalSaved = 0;
-        $errors = 0;
+        $totalCleared = 0;
+        $errors = $resolveErrors;
+        $clearedByOwner = [];
         $delay = (float) $this->option('delay');
+        $skipClear = (bool) $this->option('no-clear');
 
-        $progressBar = $this->output->createProgressBar(count($groupList));
+        $progressBar = $this->output->createProgressBar(count($resolvedGroups));
         $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% %message%');
         $progressBar->start();
 
-        foreach ($groupList as $groupName) {
+        foreach ($resolvedGroups as $group) {
+            $groupName = $group['screen_name'];
+            $ownerId = $group['owner_id'];
             $progressBar->setMessage("Обработка: {$groupName}");
-            
+
             try {
-                // Резолвим группу в ID
-                $meta = VkGroupService::resolveName($groupName);
-                
-                if (!$meta || !isset($meta->object_id)) {
-                    $progressBar->setMessage("⚠ Ошибка резолвинга: {$groupName}");
-                    $errors++;
-                    $progressBar->advance();
-                    continue;
+                if (!$skipClear) {
+                    $deleted = $this->clearDatabaseForOwner(
+                        $ownerId,
+                        $allowedOwnerIds,
+                        $period
+                    );
+                    if ($deleted > 0) {
+                        $clearedByOwner[$ownerId] = $deleted;
+                        $totalCleared += $deleted;
+                    }
                 }
-
-                $ownerId = "-{$meta->object_id}";
-
-                // Очищаем БД для этой группы (аналог --clear)
-                $this->clearDatabaseForOwner($ownerId);
 
                 // Получаем посты за период
                 $wallService->setOwner($ownerId);
-                $allPosts = $this->getPostsForPeriod($wallService, $fromTimestamp, $toTimestamp);
+                $allPosts = $this->getPostsForPeriod($wallService, $period);
 
                 if (empty($allPosts)) {
                     $progressBar->setMessage("✓ Нет постов: {$groupName}");
                     $progressBar->advance();
                     $totalProcessed++;
-                    
+
                     if ($delay > 0) {
                         usleep(1000000 * $delay);
                     }
@@ -130,7 +148,7 @@ class PostsGetAllGroups extends Command
                 $saved = $this->savePostsToDatabase($allPosts, $ownerId);
                 $totalSaved += $saved;
                 $totalProcessed++;
-                
+
                 $progressBar->setMessage("✓ Сохранено {$saved} постов: {$groupName}");
 
             } catch (\Throwable $e) {
@@ -143,7 +161,7 @@ class PostsGetAllGroups extends Command
             }
 
             $progressBar->advance();
-            
+
             // Задержка между запросами
             if ($delay > 0) {
                 usleep(1000000 * $delay);
@@ -155,9 +173,18 @@ class PostsGetAllGroups extends Command
         $this->newLine(2);
 
         // Выводим итоговую статистику
-        $this->info("=== Результаты ===");
+        $this->info('=== Результаты ===');
         $this->line("Обработано групп: {$totalProcessed}");
         $this->line("Всего сохранено постов: {$totalSaved}");
+        if (!$skipClear) {
+            $this->line("Всего удалено из БД за период: {$totalCleared}");
+            if (!empty($clearedByOwner)) {
+                $this->line('Удалено по owner_id:');
+                foreach ($clearedByOwner as $oid => $cnt) {
+                    $this->line("  {$oid}: {$cnt}");
+                }
+            }
+        }
         if ($errors > 0) {
             $this->warn("Ошибок: {$errors}");
         }
@@ -166,14 +193,48 @@ class PostsGetAllGroups extends Command
     }
 
     /**
+     * Резолв screen name из vk-groups.csv в owner_id для стены.
+     *
+     * @param array<int, string> $groupList
+     * @return array<int, array{screen_name: string, owner_id: string, type: string}>
+     */
+    private function resolveGroupsFromList(array $groupList): array
+    {
+        $resolved = [];
+
+        foreach ($groupList as $screenName) {
+            $meta = VkGroupService::resolveName($screenName);
+
+            if (!$meta || !isset($meta->object_id)) {
+                if ($this->option('verbose')) {
+                    $this->warn("Не удалось резолвить: {$screenName}");
+                }
+                continue;
+            }
+
+            $ownerId = VkGroupService::wallOwnerIdFromResolved($meta);
+            if ($ownerId === null) {
+                continue;
+            }
+
+            $resolved[] = [
+                'screen_name' => $screenName,
+                'owner_id' => $ownerId,
+                'type' => $meta->type ?? 'unknown',
+            ];
+        }
+
+        return $resolved;
+    }
+
+    /**
      * Получить все посты за период
      *
      * @param VkWallService $wallService
-     * @param int $fromTimestamp
-     * @param int $toTimestamp
+     * @param VkPostPeriod $period
      * @return array
      */
-    private function getPostsForPeriod(VkWallService $wallService, int $fromTimestamp, int $toTimestamp): array
+    private function getPostsForPeriod(VkWallService $wallService, VkPostPeriod $period): array
     {
         $allPosts = [];
         $offset = 0;
@@ -187,14 +248,16 @@ class PostsGetAllGroups extends Command
                     break;
                 }
 
-                // Фильтруем посты по дате
+                // Фильтруем посты по дате [from, to)
                 foreach ($posts as $post) {
-                    $postDate = $post->date ?? 0;
-                    
-                    if ($postDate >= $fromTimestamp && $postDate <= $toTimestamp) {
+                    $postDate = VkWallPost::timestamp($post);
+                    if ($postDate === null) {
+                        continue;
+                    }
+
+                    if ($period->containsTimestamp($postDate)) {
                         $allPosts[] = $post;
-                    } elseif ($postDate < $fromTimestamp) {
-                        // Если пост старше начала периода, прекращаем поиск
+                    } elseif (VkWallPost::shouldStopPagination($post, $period->fromInclusive)) {
                         return $allPosts;
                     }
                 }
@@ -219,22 +282,36 @@ class PostsGetAllGroups extends Command
     }
 
     /**
-     * Очистить БД для конкретного владельца
+     * Очистить в БД посты владельца за указанный период.
+     * Удаление только если owner_id входит в allowlist из vk-groups.csv.
      *
      * @param string $ownerId
-     * @return void
+     * @param array<int, string> $allowedOwnerIds
+     * @return int Количество удалённых строк
      */
-    private function clearDatabaseForOwner(string $ownerId): void
-    {
+    private function clearDatabaseForOwner(
+        string $ownerId,
+        array $allowedOwnerIds,
+        VkPostPeriod $period
+    ): int {
+        if (!in_array($ownerId, $allowedOwnerIds, true)) {
+            $this->error("Отказ очистки: owner_id {$ownerId} отсутствует в списке из vk-groups.csv");
+
+            return 0;
+        }
+
         try {
-            $deleted = DB::table('vk_posts')
+            return DB::table('vk_posts')
                 ->where('owner_id', $ownerId)
+                ->where('timestamp', '>=', $period->fromInclusive)
+                ->where('timestamp', '<', $period->toExclusive)
                 ->delete();
         } catch (\Exception $e) {
-            // Игнорируем ошибки очистки, но логируем если verbose
             if ($this->option('verbose')) {
                 $this->warn("Ошибка при очистке БД для {$ownerId}: " . $e->getMessage());
             }
+
+            return 0;
         }
     }
 
@@ -294,44 +371,5 @@ class PostsGetAllGroups extends Command
         return $saved;
     }
 
-    /**
-     * Парсинг даты в timestamp
-     *
-     * @param string $dateString
-     * @return int
-     */
-    private function parseDate(string $dateString): int
-    {
-        // Поддержка относительных дат
-        $relativeDates = [
-            'today' => 'today',
-            'yesterday' => 'yesterday',
-            'last week' => '-1 week',
-            'last month' => '-1 month',
-            'last year' => '-1 year',
-        ];
-
-        if (isset($relativeDates[strtolower($dateString)])) {
-            $dateString = $relativeDates[strtolower($dateString)];
-        }
-
-        try {
-            $carbon = Carbon::parse($dateString);
-            return $carbon->timestamp;
-        } catch (\Exception $e) {
-            throw new \InvalidArgumentException("Неверный формат даты: {$dateString}");
-        }
-    }
-
-    /**
-     * Форматирование даты для вывода
-     *
-     * @param int $timestamp
-     * @return string
-     */
-    private function formatDate(int $timestamp): string
-    {
-        return Carbon::createFromTimestamp($timestamp)->format('Y-m-d H:i:s');
-    }
 }
 
