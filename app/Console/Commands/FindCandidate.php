@@ -21,7 +21,7 @@ class FindCandidate extends Command
      *
      * @var string
      */
-    protected $description = 'Поиск кандата для републикации'; 
+    protected $description = 'Поиск кандата для републикации';
 
 
     /**
@@ -41,37 +41,43 @@ class FindCandidate extends Command
      */
     public function handle()
     {
-        
+
         $wallService = new VkWallService();
         $wallService->setOwner($this->option('owner'));
         $offset = 0;
         $all = [];
-        while(true) {           
-            $posts = $wallService->getPosts(100, $offset);
-            if (!count($posts)) {
-                break;
+
+        try {
+            while(true) {
+                $posts = $wallService->getPosts(100, $offset);
+                if (!count($posts)) {
+                    break;
+                }
+
+                foreach ($posts as $post) {
+                    array_push($all, $post);
+                }
+                sleep(1);
+                $offset += 100;
             }
-            
-            foreach ($posts as $post) {
-                array_push($all, $post);
-            }
-            sleep(1);
-            $offset += 100;
+        } catch (\App\Exceptions\Vk\VkException $e) {
+            $this->error('Ошибка при получении постов: ' . $e->getMessage());
+            return 1;
         }
-        
+
         $all = array_reverse($all);
-        
+
         foreach ($all as $post) {
             if (empty($post->text) || ($this->option('noreposts') &&  $post->reposts->count > 0)) {
                 continue;
             }
-            
+
             $this->info($post->text);
             $this->info(VkUrlBuilder::wallPost($this->option('owner'), $post->id));
             $this->info("LIKES {$post->likes->count} REPOSTS {$post->reposts->count}");
             $this->info(str_repeat('=', 100));
             sleep(5);
         }
-        
+
     }
 }

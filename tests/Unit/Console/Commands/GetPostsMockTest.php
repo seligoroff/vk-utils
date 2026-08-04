@@ -3,238 +3,155 @@
 namespace Tests\Unit\Console\Commands;
 
 use Tests\TestCase;
-use App\Console\Commands\GetPosts;
-use Illuminate\Support\Facades\Http;
+use App\Exceptions\Vk\VkApiException;
+use App\Services\VkApi\VkWallService;
+use Mockery;
 use stdClass;
 
 class GetPostsMockTest extends TestCase
 {
-    /**
-     * Создать мок поста VK API
-     */
-    private function createMockPost(array $data): stdClass
+    protected function tearDown(): void
+    {
+        parent::tearDown();
+        Mockery::close();
+    }
+
+    private function makePost(array $data): object
     {
         $post = new stdClass();
         $post->id = $data['id'] ?? 1;
         $post->date = $data['date'] ?? time();
         $post->text = $data['text'] ?? '';
-        
+
         $post->likes = new stdClass();
         $post->likes->count = $data['likes'] ?? 0;
-        
+
         $post->reposts = new stdClass();
         $post->reposts->count = $data['reposts'] ?? 0;
-        
+
         $post->comments = new stdClass();
         $post->comments->count = $data['comments'] ?? 0;
-        
+
         return $post;
     }
 
-    /**
-     * Создать мок ответа VK API для wall.get
-     */
-    private function createWallGetResponse(array $posts): array
+    private function bindMockService(array $returnPosts): VkWallService
     {
-        return [
-            'response' => [
-                'count' => count($posts),
-                'items' => $posts
-            ]
-        ];
+        $mock = Mockery::mock(VkWallService::class)->makePartial();
+        $mock->shouldReceive('getPosts')->andReturn($returnPosts);
+        $this->app->instance(VkWallService::class, $mock);
+        return $mock;
     }
 
-    /**
-     * Тест получения постов с моками API
-     */
-    public function test_gets_posts_with_mocked_api()
+    // ─────────────────────────────────────────────────────────
+
+    public function test_gets_posts_with_mocked_api(): void
     {
         $posts = [
-            $this->createMockPost([
-                'id' => 123,
-                'date' => 1672531200, // 2023-01-01 00:00:00
-                'text' => 'Тестовый пост 1',
-                'likes' => 10,
-                'reposts' => 5,
-            ]),
-            $this->createMockPost([
-                'id' => 124,
-                'date' => 1672617600, // 2023-01-02 00:00:00
-                'text' => 'Тестовый пост 2',
-                'likes' => 20,
-                'reposts' => 10,
-            ]),
+            $this->makePost(['id' => 123, 'date' => strtotime('2026-06-15'), 'text' => 'Post 1', 'likes' => 10, 'reposts' => 5]),
+            $this->makePost(['id' => 124, 'date' => strtotime('2026-06-16'), 'text' => 'Post 2', 'likes' => 20, 'reposts' => 10]),
         ];
 
-        // Мокаем HTTP запросы к VK API
-        Http::fake([
-            'https://api.vk.com/method/wall.get*' => Http::response($this->createWallGetResponse($posts), 200),
-        ]);
+        $this->bindMockService($posts);
 
-        $command = $this->artisan('vk:posts-get', [
-            '--owner' => '-12345678',
-            '--from' => '2023-01-01',
-            '--to' => '2023-01-03',
+        $this->artisan('vk:posts-get', [
+            '--owner'  => '-12345678',
+            '--from'   => '2026-06-01',
+            '--to'     => '2026-07-01',
             '--format' => 'json',
-        ]);
-
-        $command->assertExitCode(0);
-        
-        // Проверяем, что команда выполнилась успешно
-        // (моки HTTP запросов проверяются автоматически через Http::fake)
+        ])->assertExitCode(0);
     }
 
-    /**
-     * Тест фильтрации постов по дате с моками
-     */
-    public function test_filters_posts_by_date_with_mocks()
+    public function test_filters_posts_by_date_with_mocks(): void
     {
         $posts = [
-            $this->createMockPost([
-                'id' => 123,
-                'date' => 1672531200, // 2023-01-01 00:00:00
-                'text' => 'Пост в диапазоне',
-            ]),
-            $this->createMockPost([
-                'id' => 125,
-                'date' => 1672704000, // 2023-01-04 00:00:00 - вне диапазона
-                'text' => 'Пост вне диапазона',
-            ]),
+            $this->makePost(['id' => 123, 'date' => strtotime('2026-06-15'), 'text' => 'In range']),
+            $this->makePost(['id' => 125, 'date' => strtotime('2026-07-15'), 'text' => 'Out of range']),
         ];
 
-        Http::fake([
-            'https://api.vk.com/method/wall.get*' => Http::response($this->createWallGetResponse($posts), 200),
-        ]);
+        $this->bindMockService($posts);
 
-        $command = $this->artisan('vk:posts-get', [
-            '--owner' => '-12345678',
-            '--from' => '2023-01-01',
-            '--to' => '2023-01-02',
+        $this->artisan('vk:posts-get', [
+            '--owner'  => '-12345678',
+            '--from'   => '2026-06-01',
+            '--to'     => '2026-07-01',
             '--format' => 'json',
-        ]);
-
-        $command->assertExitCode(0);
+        ])->assertExitCode(0);
     }
 
-    /**
-     * Тест фильтрации постов с текстом с моками
-     */
-    public function test_filters_posts_with_text_only_with_mocks()
+    public function test_filters_posts_with_text_only_with_mocks(): void
     {
         $posts = [
-            $this->createMockPost([
-                'id' => 123,
-                'text' => 'Пост с текстом',
-                'likes' => 10,
-            ]),
-            $this->createMockPost([
-                'id' => 124,
-                'text' => '', // Без текста
-                'likes' => 5,
-            ]),
+            $this->makePost(['id' => 123, 'text' => 'Has text', 'likes' => 10]),
+            $this->makePost(['id' => 124, 'text' => '', 'likes' => 5]),
         ];
 
-        Http::fake([
-            'https://api.vk.com/method/wall.get*' => Http::response($this->createWallGetResponse($posts), 200),
-        ]);
+        $this->bindMockService($posts);
 
-        $command = $this->artisan('vk:posts-get', [
-            '--owner' => '-12345678',
-            '--from' => '2023-01-01',
+        $this->artisan('vk:posts-get', [
+            '--owner'         => '-12345678',
+            '--from'          => '2026-06-01',
             '--with-text-only' => true,
-            '--format' => 'json',
-        ]);
-
-        $command->assertExitCode(0);
+            '--format'        => 'json',
+        ])->assertExitCode(0);
     }
 
-    /**
-     * Тест обработки пустого ответа API
-     */
-    public function test_handles_empty_api_response()
+    public function test_handles_empty_api_response(): void
     {
-        Http::fake([
-            'https://api.vk.com/method/wall.get*' => Http::response([
-                'response' => [
-                    'count' => 0,
-                    'items' => []
-                ]
-            ], 200),
-        ]);
+        $this->bindMockService([]);
 
-        $command = $this->artisan('vk:posts-get', [
-            '--owner' => '-12345678',
-            '--from' => '2023-01-01',
+        $this->artisan('vk:posts-get', [
+            '--owner'  => '-12345678',
+            '--from'   => '2026-06-01',
             '--format' => 'json',
-        ]);
-
-        $command->assertExitCode(0);
+        ])->assertExitCode(0);
     }
 
-    /**
-     * Тест обработки ошибки API
-     */
-    public function test_handles_api_error()
+    public function test_handles_api_error(): void
     {
-        Http::fake([
-            'https://api.vk.com/method/wall.get*' => Http::response([
-                'error' => [
-                    'error_code' => 15,
-                    'error_msg' => 'Access denied'
-                ]
-            ], 200),
-        ]);
+        $mock = Mockery::mock(VkWallService::class)->makePartial();
+        $mock->shouldReceive('getPosts')
+            ->andThrow(new VkApiException(
+                'Доступ к стене запрещён. Проверьте owner ID и права токена.',
+                VkApiException::REASON_ACCESS_DENIED,
+                15
+            ));
+        $this->app->instance(VkWallService::class, $mock);
 
-        $command = $this->artisan('vk:posts-get', [
-            '--owner' => '-12345678',
-            '--from' => '2023-01-01',
+        // With the new contract, API errors produce nonzero exit code
+        $this->artisan('vk:posts-get', [
+            '--owner'  => '-12345678',
+            '--from'   => '2026-06-01',
             '--format' => 'json',
-        ]);
-
-        // Команда должна обработать ошибку (может вернуть 0 или 1 в зависимости от реализации)
-        $command->assertExitCode(0);
+        ])->assertExitCode(1);
     }
 
-    /**
-     * Тест пагинации с моками
-     */
-    public function test_handles_pagination_with_mocks()
+    public function test_handles_pagination_with_mocks(): void
     {
-        // Первая страница
-        $postsPage1 = [];
+        // Page 1: 100 posts → command requests page 2
+        $page1 = [];
         for ($i = 1; $i <= 100; $i++) {
-            $postsPage1[] = $this->createMockPost([
-                'id' => $i,
-                'date' => 1672531200 + $i,
-                'text' => "Пост {$i}",
+            $page1[] = $this->makePost([
+                'id'   => $i,
+                'date' => strtotime('2026-06-15') + $i,
+                'text' => "Post {$i}",
             ]);
         }
 
-        // Вторая страница (меньше 100, значит последняя)
-        $postsPage2 = [
-            $this->createMockPost([
-                'id' => 101,
-                'date' => 1672531200 + 101,
-                'text' => 'Пост 101',
-            ]),
+        // Page 2: 1 post → command stops pagination
+        $page2 = [
+            $this->makePost(['id' => 101, 'date' => strtotime('2026-06-15') + 101, 'text' => 'Post 101']),
         ];
 
-        Http::fake([
-            'https://api.vk.com/method/wall.get*' => Http::sequence()
-                ->push($this->createWallGetResponse($postsPage1), 200)
-                ->push($this->createWallGetResponse($postsPage2), 200),
-        ]);
+        $mock = Mockery::mock(VkWallService::class)->makePartial();
+        $mock->shouldReceive('getPosts')->once()->with(100, 0)->andReturn($page1);
+        $mock->shouldReceive('getPosts')->once()->with(100, 100)->andReturn($page2);
+        $this->app->instance(VkWallService::class, $mock);
 
-        $command = $this->artisan('vk:posts-get', [
-            '--owner' => '-12345678',
-            '--from' => '2023-01-01',
+        $this->artisan('vk:posts-get', [
+            '--owner'  => '-12345678',
+            '--from'   => '2026-06-01',
             '--format' => 'json',
-        ]);
-
-        $command->assertExitCode(0);
-        
-        // Проверяем, что команда выполнилась успешно
-        // (моки HTTP запросов проверяются автоматически через Http::fake)
+        ])->assertExitCode(0);
     }
 }
-

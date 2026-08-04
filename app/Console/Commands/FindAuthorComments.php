@@ -41,37 +41,42 @@ class FindAuthorComments extends Command
     {
         $wallService = new VkWallService();
         $wallService->setOwner($this->option('owner'));
-        
+
         $offset = 0;
-        
-        while(true) {           
-            $posts = $wallService->getPosts(100, $offset);
-            if (!count($posts)) {
-                break;
+
+        try {
+            while(true) {
+                $posts = $wallService->getPosts(100, $offset);
+                if (!count($posts)) {
+                    break;
+                }
+
+                foreach ($posts as $post) {
+                    $this->_parseComments($wallService, $post->id);
+                }
+
+                sleep(1);
+                $offset += 100;
             }
-            
-            foreach ($posts as $post) {                
-                $this->_parseComments($wallService, $post->id);                
-            }
-                                    
-            sleep(1);
-            $offset += 100;
+        } catch (\App\Exceptions\Vk\VkException $e) {
+            $this->error('Ошибка при получении постов: ' . $e->getMessage());
+            return 1;
         }
     }
-    
-    
+
+
     private function _parseComments($wallService, $postId)
     {
         $comments_offset = 0;
         $author = $this->option('author');
-        
+
         while (true) {
-            
+
             $comments = $wallService->getComments($postId, $comments_offset);
             if (empty($comments)) {
                 break;
             }
-            
+
             foreach ($comments as $comment) {
                 if ($comment->from_id != $author) {
                     continue;
@@ -82,6 +87,6 @@ class FindAuthorComments extends Command
             $comments_offset += 100;
         }
     }
-    
-    
+
+
 }

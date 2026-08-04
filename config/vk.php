@@ -68,5 +68,28 @@ return [
 
     'analytics_timezone' => env('VK_ANALYTICS_TIMEZONE', null),
 
+    /*
+    |--------------------------------------------------------------------------
+    | API Timeout Configuration
+    |--------------------------------------------------------------------------
+    |
+    | Maximum time (in seconds) for VK API requests.
+    | Increase if you encounter timeouts with large wall.get responses.
+    |
+    */
+
+    'api_timeout' => (float) env('VK_API_TIMEOUT', 30),
+
+    /*
+    |--------------------------------------------------------------------------
+    | API Connect Timeout
+    |--------------------------------------------------------------------------
+    |
+    | Maximum time (in seconds) to establish connection to VK API.
+    |
+    */
+
+    'api_connect_timeout' => (float) env('VK_API_CONNECT_TIMEOUT', 10),
+
 ];
 

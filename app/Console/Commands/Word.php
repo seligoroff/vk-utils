@@ -93,7 +93,7 @@ class Word extends Command
             // Поиск через API
             $this->info("Поиск постов со словом '{$word}' через API с {$this->formatDate($fromTimestamp)} по {$this->formatDate($toTimestamp)}...");
             
-            $wallService = new VkWallService();
+            $wallService = app()->make(VkWallService::class);
             $wallService->setOwner($this->option('owner'));
 
             $matchedPosts = [];
@@ -104,7 +104,7 @@ class Word extends Command
                 while (true) {
                     $posts = $wallService->getPosts(100, $offset);
                     
-                    if (empty($posts) || !is_array($posts)) {
+                    if (empty($posts)) {
                         break;
                     }
 

@@ -5,6 +5,31 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 и проект следует [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [0.9.1] - 2026-07-17
+
+### Исправлено
+- **P0.1 — ошибки VK API больше не трактуются как пустая стена**
+  - `VkWallService::getPosts()`: новый контракт — возвращает `[]` только при реально пустой стене, ошибки пробрасывает исключениями
+  - Доменные исключения: `VkApiException` (Access denied, Rate limit, Invalid token), `VkTransportException` (Timeout, Connection), `VkUnexpectedResponseException`
+  - Автоматический повтор (до 2 попыток всего) для временных ошибок: таймаут, проблемы соединения, rate limit (включая код 29)
+  - Токен и другие секреты отсутствуют во всех пользовательских сообщениях; для неизвестных ошибок API выводится фиксированный безопасный текст
+  - Настраиваемые таймауты HTTP-клиента: `VK_API_TIMEOUT` (30 с) и `VK_API_CONNECT_TIMEOUT` (10 с) в `config/vk.php`
+  - Структурированное логирование финальной ошибки в `laravel.log` (без токенов)
+  - `--clear` отложен до успешной загрузки всех страниц: ошибка на любой странице предотвращает удаление данных из БД
+  - `vk:check` возвращает ненулевой код при ошибках получения постов
+
+### Добавлено
+- Классы доменных исключений: `App\Exceptions\Vk\VkException`, `VkApiException`, `VkTransportException`, `VkUnexpectedResponseException`
+- Фабрика HTTP-клиента `App\Services\VkApi\VkHttpClientFactory` с таймаутами из конфига
+- Unit-тесты: `VkWallServiceTest` (18 сценариев), `VkHttpClientFactoryTest` (2 сценария)
+- Feature-тесты: `GetPostsCommandTest` (7 сценариев), `PostsGetAllCommandTest` (1 сценарий), `WordCommandTest` (1 сценарий)
+
+### Изменено
+- `VkSdkAdapter::wall()` возвращает `VK\Actions\Wall` с кастомным HTTP-клиентом (вместо жёсткого 10-секундного таймаута SDK)
+- `GetPosts::handle()`, `CheckReaction::handle()`, `Word` — получают `VkWallService` через контейнер (DI для тестирования)
+- Аудированы все 7 потребителей `getPosts()`: `GetPosts`, `PostsGetAllGroups`, `CheckReaction`, `FindAuthorComments`, `FindCandidate`, `FindDups`, `Word`
+- Обновлены `config/vk.php`, `.env.example`, `docs/configuration.md`, `docs/commands.md`, `docs/examples.md`, `docs/troubleshooting.md`
+
 ## [0.9.0] - 2026-07-13
 
 ### Добавлено

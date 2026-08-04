@@ -2,6 +2,7 @@
 
 namespace App\Services\VkApi;
 
+use VK\Actions\Wall;
 use VK\Client\VKApiClient;
 
 /**
@@ -17,6 +18,8 @@ class VkSdkAdapter
     private VKApiClient $client;
     private string $token;
     private string $version;
+    private ?VkHttpClientFactory $httpClientFactory = null;
+    private ?Wall $wallInstance = null;
 
     /**
      * Create a new VK SDK adapter instance
@@ -26,6 +29,16 @@ class VkSdkAdapter
         $this->version = config('vk.version', '5.131');
         $this->client = new VKApiClient($this->version);
         $this->token = config('vk.token', '');
+        $this->httpClientFactory = new VkHttpClientFactory();
+    }
+
+    /**
+     * Set a custom HTTP client factory (for testing).
+     */
+    public function setHttpClientFactory(?VkHttpClientFactory $factory): void
+    {
+        $this->httpClientFactory = $factory;
+        $this->wallInstance = null;
     }
 
     /**
@@ -50,12 +63,24 @@ class VkSdkAdapter
 
     /**
      * Get wall API methods
-     * 
-     * @return \VK\Api\Wall
+     *
+     * Uses a dedicated VKApiRequest with configured timeouts
+     * instead of the default SDK client (which hardcodes 10 s).
+     *
+     * @return \VK\Actions\Wall
      */
-    public function wall()
+    public function wall(): Wall
     {
-        return $this->client->wall();
+        if ($this->wallInstance === null && $this->httpClientFactory !== null) {
+            $request = $this->httpClientFactory->createRequest(
+                $this->version,
+                null // language — use default
+            );
+            $this->wallInstance = new Wall($request);
+        }
+
+        // Fallback to default client if factory was explicitly set to null
+        return $this->wallInstance ?? $this->client->wall();
     }
 
     /**

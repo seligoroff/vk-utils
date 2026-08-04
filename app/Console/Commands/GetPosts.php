@@ -43,7 +43,7 @@ class GetPosts extends Command
      *
      * @return int
      */
-    public function handle()
+    public function handle(?VkWallService $wallService = null)
     {
         // Валидация обязательных параметров
         if (!$this->option('owner')) {
@@ -74,15 +74,11 @@ class GetPosts extends Command
             return 1;
         }
 
-        // Очистка постов за период перед получением (если указана опция --clear)
-        if ($this->option('db') && $this->option('clear')) {
-            $this->clearDatabase($period);
-        }
-
         // Получение постов
+        // ВНИМАНИЕ: очистка (--clear) отложена до успешной загрузки всех страниц
         $this->info("Получение постов с {$period->fromLabel()} по {$period->toInclusiveLabel()}...");
         
-        $wallService = new VkWallService();
+        $wallService = $wallService ?? new VkWallService();
         $wallService->setOwner($this->option('owner'));
 
         $filteredPosts = [];
@@ -95,7 +91,7 @@ class GetPosts extends Command
             while (true) {
                 $posts = $wallService->getPosts(100, $offset);
                 
-                if (empty($posts) || !is_array($posts)) {
+                if (empty($posts)) {
                     break;
                 }
 
@@ -173,13 +169,19 @@ class GetPosts extends Command
                 $this->newLine();
             }
 
-        } catch (\Throwable $e) {
+        } catch (\App\Exceptions\Vk\VkException $e) {
             if ($progressBar) {
                 $progressBar->finish();
                 $this->newLine();
             }
             $this->error('Ошибка при получении постов: ' . $e->getMessage());
             return 1;
+        }
+
+        // Очистка БД после успешной загрузки всех страниц (если --clear)
+        // Выполняется только когда все страницы получены без ошибок.
+        if ($this->option('db') && $this->option('clear')) {
+            $this->clearDatabase($period);
         }
 
         if (empty($filteredPosts)) {
@@ -447,7 +449,7 @@ class GetPosts extends Command
     private function explainEmptyPostsFromApi(array $lastBatch, VkPostPeriod $period, int $totalProcessed): void
     {
         if (empty($lastBatch)) {
-            $this->line('  API не вернул постов (проверьте --owner и права токена).');
+            $this->line('  API вернул пустой ответ — постов за запрошенный период нет.');
             return;
         }
 
@@ -548,6 +550,7 @@ class GetPosts extends Command
                         'likes' => $post->likes->count ?? 0,
                         'reposts' => $post->reposts->count ?? 0,
                         'comments' => $post->comments->count ?? 0,
+                        'views' => $post->views->count ?? 0,
                         'url' => VkUrlBuilder::wallPost($this->option('owner'), $post->id),
                         'updated_at' => Carbon::now(),
                     ];

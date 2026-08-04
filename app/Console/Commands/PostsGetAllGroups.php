@@ -117,6 +117,11 @@ class PostsGetAllGroups extends Command
             $progressBar->setMessage("Обработка: {$groupName}");
 
             try {
+                // Получаем посты за период
+                $wallService->setOwner($ownerId);
+                $allPosts = $this->getPostsForPeriod($wallService, $period);
+
+                // Очистка БД после успешной загрузки (если не --no-clear)
                 if (!$skipClear) {
                     $deleted = $this->clearDatabaseForOwner(
                         $ownerId,
@@ -128,10 +133,6 @@ class PostsGetAllGroups extends Command
                         $totalCleared += $deleted;
                     }
                 }
-
-                // Получаем посты за период
-                $wallService->setOwner($ownerId);
-                $allPosts = $this->getPostsForPeriod($wallService, $period);
 
                 if (empty($allPosts)) {
                     $progressBar->setMessage("✓ Нет постов: {$groupName}");
@@ -204,6 +205,7 @@ class PostsGetAllGroups extends Command
 
         foreach ($groupList as $screenName) {
             $meta = VkGroupService::resolveName($screenName);
+            usleep(350000); // 0.35s между резолвами — защита от rate limit
 
             if (!$meta || !isset($meta->object_id)) {
                 if ($this->option('verbose')) {
@@ -241,41 +243,35 @@ class PostsGetAllGroups extends Command
         $count = 100;
 
         while (true) {
-            try {
-                $posts = $wallService->getPosts($count, $offset);
-                
-                if (empty($posts) || !is_array($posts)) {
-                    break;
-                }
+            $posts = $wallService->getPosts($count, $offset);
 
-                // Фильтруем посты по дате [from, to)
-                foreach ($posts as $post) {
-                    $postDate = VkWallPost::timestamp($post);
-                    if ($postDate === null) {
-                        continue;
-                    }
-
-                    if ($period->containsTimestamp($postDate)) {
-                        $allPosts[] = $post;
-                    } elseif (VkWallPost::shouldStopPagination($post, $period->fromInclusive)) {
-                        return $allPosts;
-                    }
-                }
-
-                // Если получили меньше постов чем запрашивали, значит это последняя страница
-                if (count($posts) < $count) {
-                    break;
-                }
-
-                $offset += $count;
-
-                // Небольшая задержка между запросами к API
-                usleep(300000); // 0.3 секунды
-
-            } catch (\Exception $e) {
-                $this->warn("Ошибка при получении постов: " . $e->getMessage());
+            if (empty($posts)) {
                 break;
             }
+
+            // Фильтруем посты по дате [from, to)
+            foreach ($posts as $post) {
+                $postDate = VkWallPost::timestamp($post);
+                if ($postDate === null) {
+                    continue;
+                }
+
+                if ($period->containsTimestamp($postDate)) {
+                    $allPosts[] = $post;
+                } elseif (VkWallPost::shouldStopPagination($post, $period->fromInclusive)) {
+                    return $allPosts;
+                }
+            }
+
+            // Если получили меньше постов чем запрашивали, значит это последняя страница
+            if (count($posts) < $count) {
+                break;
+            }
+
+            $offset += $count;
+
+            // Небольшая задержка между запросами к API
+            usleep(300000); // 0.3 секунды
         }
 
         return $allPosts;
@@ -342,6 +338,7 @@ class PostsGetAllGroups extends Command
                         'likes' => $post->likes->count ?? 0,
                         'reposts' => $post->reposts->count ?? 0,
                         'comments' => $post->comments->count ?? 0,
+                        'views' => $post->views->count ?? 0,
                         'url' => VkUrlBuilder::wallPost($ownerId, $post->id),
                         'created_at' => Carbon::now(),
                         'updated_at' => Carbon::now(),

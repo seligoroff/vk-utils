@@ -20,7 +20,7 @@ class FindDups extends Command
      *
      * @var string
      */
-    protected $description = 'Поиск дублей'; 
+    protected $description = 'Поиск дублей';
 
 
     /**
@@ -34,31 +34,36 @@ class FindDups extends Command
     }
 
         /**
-     * 
+     *
      */
     public function handle()
     {
         $wallService = new VkWallService();
         $wallService->setOwner($this->option('owner'));
-        
+
         $offset = 0;
-        while(true) {
-            $posts = $wallService->getPosts(100, $offset);
-            if (!count($posts)) {
-                break;
-            }
-            foreach ($posts as $post) {
-                if (!preg_match("/{$this->option('text')}/iu", $post->text)) {
-                    continue;
+        try {
+            while(true) {
+                $posts = $wallService->getPosts(100, $offset);
+                if (!count($posts)) {
+                    break;
                 }
-                $this->info(json_encode([
-                    'url' => VkUrlBuilder::wallPost($this->option('owner'), $post->id), 
-                    'likes' => $post->likes->count, 
-                    'reposts' => $post->reposts->count
-                ]));
-            }                    
-            $offset += 100;
-            
+                foreach ($posts as $post) {
+                    if (!preg_match("/{$this->option('text')}/iu", $post->text)) {
+                        continue;
+                    }
+                    $this->info(json_encode([
+                        'url' => VkUrlBuilder::wallPost($this->option('owner'), $post->id),
+                        'likes' => $post->likes->count,
+                        'reposts' => $post->reposts->count
+                    ]));
+                }
+                $offset += 100;
+
+            }
+        } catch (\App\Exceptions\Vk\VkException $e) {
+            $this->error('Ошибка при получении постов: ' . $e->getMessage());
+            return 1;
         }
     }
 }

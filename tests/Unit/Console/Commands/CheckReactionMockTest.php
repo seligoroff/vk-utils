@@ -3,9 +3,12 @@
 namespace Tests\Unit\Console\Commands;
 
 use Tests\TestCase;
-use Illuminate\Support\Facades\Http;
+use App\Exceptions\Vk\VkApiException;
+use App\Services\VkApi\VkWallService;
+use App\Services\VkApi\VkGroupService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Mockery;
 use stdClass;
 
 class CheckReactionMockTest extends TestCase
@@ -18,12 +21,10 @@ class CheckReactionMockTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        
-        // Создаем тестовый CSV файл
+
         $this->testCsvFile = resource_path('vk-groups.csv');
         $this->backupFile = resource_path('vk-groups.csv.backup');
-        
-        // Сохраняем оригинальный файл, если существует
+
         if (file_exists($this->testCsvFile)) {
             copy($this->testCsvFile, $this->backupFile);
         }
@@ -31,237 +32,158 @@ class CheckReactionMockTest extends TestCase
 
     protected function tearDown(): void
     {
-        // Восстанавливаем оригинальный файл
         if (file_exists($this->backupFile)) {
             copy($this->backupFile, $this->testCsvFile);
             unlink($this->backupFile);
         } elseif (file_exists($this->testCsvFile)) {
-            // Удаляем тестовый файл, если оригинального не было
             unlink($this->testCsvFile);
         }
-        
+
+        Mockery::close();
         parent::tearDown();
     }
 
-    /**
-     * Создать тестовый CSV файл
-     */
     private function createTestCsvFile(array $groups): void
     {
-        $lines = array_map(function($group) {
-            return "https://vk.com/{$group}";
-        }, $groups);
-        
+        $lines = array_map(fn($g) => "https://vk.com/{$g}", $groups);
         file_put_contents($this->testCsvFile, implode("\n", $lines));
     }
 
-    /**
-     * Создать мок поста
-     */
-    private function createMockPost(array $data): stdClass
+    private function mockPost(string $text, int $likes = 10): object
     {
         $post = new stdClass();
-        $post->id = $data['id'] ?? 1;
-        $post->text = $data['text'] ?? '';
-        
+        $post->id = 123;
+        $post->text = $text;
         $post->likes = new stdClass();
-        $post->likes->count = $data['likes'] ?? 0;
-        
+        $post->likes->count = $likes;
         $post->reposts = new stdClass();
-        $post->reposts->count = $data['reposts'] ?? 0;
-        
+        $post->reposts->count = 5;
+        $post->comments = new stdClass();
+        $post->comments->count = 2;
         return $post;
     }
 
-    /**
-     * Создать мок ответа для utils.resolveScreenName
-     */
-    private function createResolveResponse(int $objectId): array
+    private function mockGroupMeta(int $objectId): object
     {
-        return [
-            'response' => [
-                'type' => 'group',
-                'object_id' => $objectId
-            ]
-        ];
+        $meta = new stdClass();
+        $meta->type = 'group';
+        $meta->object_id = $objectId;
+        return $meta;
     }
 
-    /**
-     * Создать мок ответа для groups.getById
-     */
-    private function createGroupByIdResponse(string $name, int $id): array
+    private function mockGroupInfo(string $name, int $id): object
     {
-        return [
-            'response' => [
-                [
-                    'id' => $id,
-                    'name' => $name,
-                ]
-            ]
-        ];
+        $group = new stdClass();
+        $group->id = $id;
+        $group->name = $name;
+        $group->members_count = 500;
+        return $group;
     }
 
-    /**
-     * Создать мок ответа для wall.get
-     */
-    private function createWallGetResponse(array $posts): array
+    private function mockGroupServices(): void
     {
-        return [
-            'response' => [
-                'count' => count($posts),
-                'items' => $posts
-            ]
-        ];
+        $groupSvc = Mockery::mock('alias:' . VkGroupService::class);
+        $groupSvc->shouldReceive('resolveName')
+            ->andReturn($this->mockGroupMeta(12345678));
+        $groupSvc->shouldReceive('getById')
+            ->with(12345678, Mockery::any())
+            ->andReturn($this->mockGroupInfo('Test Group', 12345678));
+        $groupSvc->shouldReceive('wallOwnerIdFromResolved')
+            ->andReturn('-12345678');
     }
 
+    // ────────────────────────────────────────────────────────
+
     /**
-     * Тест проверки реакций с моками
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
      */
-    public function test_checks_reactions_with_mocks()
+    public function test_checks_reactions_with_mocks(): void
+    {
+        $this->createTestCsvFile(['group1']);
+        $this->mockGroupServices();
+
+        $mock = Mockery::mock('overload:' . VkWallService::class)->makePartial();
+        $mock->shouldReceive('getPosts')->andReturn([$this->mockPost('Test post', 10)]);
+        $mock->shouldReceive('setOwner')->andReturnSelf();
+
+        $this->artisan('vk:check')->assertExitCode(0);
+    }
+
+    public function test_uses_cache_when_available(): void
     {
         $this->createTestCsvFile(['group1']);
 
-        $post = $this->createMockPost([
-            'id' => 123,
-            'text' => 'Тестовый пост с текстом',
-            'likes' => 10,
-            'reposts' => 5,
-        ]);
-
-        Http::fake([
-            'api.vk.com/method/utils.resolveScreenName*' => Http::response(
-                $this->createResolveResponse(12345678), 
-                200
-            ),
-            'api.vk.com/method/groups.getById*' => Http::response(
-                $this->createGroupByIdResponse('Test Group', 12345678), 
-                200
-            ),
-            'api.vk.com/method/wall.get*' => Http::response(
-                $this->createWallGetResponse([$post]), 
-                200
-            ),
-        ]);
-
-        $command = $this->artisan('vk:check');
-
-        $command->assertExitCode(0);
-        
-        // Проверяем, что команда выполнилась успешно
-        // (моки HTTP запросов проверяются автоматически через Http::fake)
-    }
-
-    /**
-     * Тест использования кеша
-     */
-    public function test_uses_cache_when_available()
-    {
-        $this->createTestCsvFile(['group1']);
-
-        // Сохраняем кеш в БД
         DB::table('vk_check_cache')->insert([
-            'group_name' => 'Test Group',
-            'group_id' => 12345678,
-            'post_text' => 'Тестовый пост',
-            'likes' => 10,
-            'reposts' => 5,
-            'cached_at' => now(),
-            'created_at' => now(),
-            'updated_at' => now(),
+            'group_name'    => 'Test Group',
+            'group_id'      => 12345678,
+            'post_text'     => 'Cached post',
+            'likes'         => 10,
+            'reposts'       => 5,
+            'members_count' => 500,
+            'post_date'     => time(),
+            'cached_at'     => now(),
+            'created_at'    => now(),
+            'updated_at'    => now(),
         ]);
 
-        $command = $this->artisan('vk:check', ['--cached' => true]);
-
-        $command->assertExitCode(0);
-        
-        // Проверяем, что запросы к API не были сделаны
-        Http::assertNothingSent();
+        $this->artisan('vk:check', ['--cached' => true])->assertExitCode(0);
     }
 
     /**
-     * Тест обработки группы без постов с текстом
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
      */
-    public function test_handles_group_without_text_posts()
+    public function test_handles_group_without_text_posts(): void
     {
         $this->createTestCsvFile(['group1']);
+        $this->mockGroupServices();
 
-        // Пост без текста
-        $post = $this->createMockPost([
-            'id' => 123,
-            'text' => '', // Пустой текст
-            'likes' => 10,
-        ]);
+        $mock = Mockery::mock('overload:' . VkWallService::class)->makePartial();
+        $mock->shouldReceive('getPosts')->andReturn([$this->mockPost('', 5)]);
+        $mock->shouldReceive('setOwner')->andReturnSelf();
 
-        Http::fake([
-            'https://api.vk.com/method/utils.resolveScreenName*' => Http::response(
-                $this->createResolveResponse(12345678), 
-                200
-            ),
-            'https://api.vk.com/method/groups.getById*' => Http::response(
-                $this->createGroupByIdResponse('Test Group', 12345678), 
-                200
-            ),
-            'https://api.vk.com/method/wall.get*' => Http::response(
-                $this->createWallGetResponse([$post]), 
-                200
-            ),
-        ]);
-
-        $command = $this->artisan('vk:check');
-
-        // Команда должна завершиться успешно, но без данных в таблице
-        $command->assertExitCode(0);
+        $this->artisan('vk:check')->assertExitCode(0);
     }
 
     /**
-     * Тест обработки пустого ответа wall.get
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
      */
-    public function test_handles_empty_wall_response()
+    public function test_handles_empty_wall_response(): void
     {
         $this->createTestCsvFile(['group1']);
+        $this->mockGroupServices();
 
-        Http::fake([
-            'https://api.vk.com/method/utils.resolveScreenName*' => Http::response(
-                $this->createResolveResponse(12345678), 
-                200
-            ),
-            'https://api.vk.com/method/groups.getById*' => Http::response(
-                $this->createGroupByIdResponse('Test Group', 12345678), 
-                200
-            ),
-            'https://api.vk.com/method/wall.get*' => Http::response([
-                'response' => [
-                    'count' => 0,
-                    'items' => []
-                ]
-            ], 200),
-        ]);
+        $mock = Mockery::mock('overload:' . VkWallService::class)->makePartial();
+        $mock->shouldReceive('getPosts')->andReturn([]);
+        $mock->shouldReceive('setOwner')->andReturnSelf();
 
-        $command = $this->artisan('vk:check');
-
-        $command->assertExitCode(0);
+        $this->artisan('vk:check')->assertExitCode(0);
     }
 
     /**
-     * Тест обработки ошибки API
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
      */
-    public function test_handles_api_error()
+    public function test_handles_api_error(): void
     {
         $this->createTestCsvFile(['group1']);
 
-        Http::fake([
-            'https://api.vk.com/method/utils.resolveScreenName*' => Http::response([
-                'error' => [
-                    'error_code' => 15,
-                    'error_msg' => 'Access denied'
-                ]
-            ], 200),
-        ]);
+        $groupSvc = Mockery::mock('alias:' . VkGroupService::class);
+        $groupSvc->shouldReceive('resolveName')
+            ->andReturn($this->mockGroupMeta(12345678));
+        $groupSvc->shouldReceive('getById')
+            ->with(12345678, Mockery::any())
+            ->andReturn($this->mockGroupInfo('Test Group', 12345678));
+        $groupSvc->shouldReceive('wallOwnerIdFromResolved')
+            ->andReturn('-12345678');
 
-        $command = $this->artisan('vk:check');
+        $mock = Mockery::mock('overload:' . VkWallService::class)->makePartial();
+        $mock->shouldReceive('getPosts')
+            ->andThrow(new VkApiException('Access denied', VkApiException::REASON_ACCESS_DENIED, 15));
+        $mock->shouldReceive('setOwner')->andReturnSelf();
 
-        // Команда должна обработать ошибку и продолжить
-        $command->assertExitCode(0);
+        $this->artisan('vk:check')->assertExitCode(1);
     }
 }
-

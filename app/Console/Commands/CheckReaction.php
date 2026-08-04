@@ -53,7 +53,7 @@ class CheckReaction extends Command
      *
      * @return int
      */
-    public function handle()
+    public function handle(?VkWallService $wallService = null)
     {
         try {
             $list = Resource::getList();
@@ -61,8 +61,9 @@ class CheckReaction extends Command
             $this->error($e->getMessage());
             return 1;
         }        
-        $wallService = new VkWallService();
+        $wallService = $wallService ?? new VkWallService();
         $data = [];
+        $errors = 0;
         
         // Проверяем, нужно ли использовать кэш из БД
         $useCache = $this->option('cached') && $this->hasCacheInDatabase();
@@ -81,6 +82,7 @@ class CheckReaction extends Command
                     $group = VkGroupService::getById($meta->object_id, ['members_count']);
                     $posts = $wallService->getPosts();
                 } catch (\Throwable $e) {
+                    $errors++;
                     $this->alert($e->getMessage());
                     continue;  
                 }
@@ -187,7 +189,7 @@ class CheckReaction extends Command
             }
         }
         
-        return 0;
+        return $errors > 0 ? 1 : 0;
     }
 
     /**
