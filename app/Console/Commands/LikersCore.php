@@ -6,6 +6,8 @@ use App\Services\VkApi\VkFriendsService;
 use App\Services\VkApi\VkLikesService;
 use App\Services\VkApi\VkUsersService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class LikersCore extends Command
 {
@@ -21,6 +23,7 @@ class LikersCore extends Command
                             {--max-users=300 : Максимум лайкнувших для анализа}
                             {--delay=0.2 : Задержка между запросами friends.get в секундах}
                             {--verbose-errors : Показать сводку ошибок API при получении друзей}
+                            {--demographics : Показать демографию (пол/возраст) по сегментам}
                             {--format=table : Формат вывода: table, json, csv, markdown}
                             {--output= : Путь к файлу для сохранения результатов}';
 
@@ -69,6 +72,11 @@ class LikersCore extends Command
         $likesService = new VkLikesService();
         $friendsService = new VkFriendsService();
         $usersService = new VkUsersService();
+
+        $postViews = DB::table('vk_posts')
+            ->where('owner_id', $owner)
+            ->where('post_id', $postId)
+            ->value('views') ?? 0;
 
         $this->info("Получение лайкнувших пост {$owner}_{$postId}...");
         $likers = $this->getAllLikers($likesService, $owner, $postId);
@@ -146,18 +154,21 @@ class LikersCore extends Command
         $bar->finish();
         $this->newLine(2);
 
-        if ($verboseErrors && !empty($errorStats)) {
-            $this->warn('Сводка ошибок friends.get:');
+        if (!empty($errorStats)) {
+            $this->info('Причины ошибок friends.get:');
             $errorRows = [];
             foreach ($errorStats as $error => $meta) {
-                $errorRows[] = [
-                    $error,
-                    $meta['count'],
-                    implode(', ', $meta['users']),
-                ];
+                $errorRows[] = [$error, $meta['count']];
             }
             usort($errorRows, fn(array $a, array $b) => $b[1] <=> $a[1]);
-            $this->table(['Ошибка', 'Количество', 'Примеры user_id'], $errorRows);
+            $this->table(['Причина', 'Количество'], $errorRows);
+
+            if ($verboseErrors) {
+                $this->line('Примеры user_id:');
+                foreach ($errorStats as $error => $meta) {
+                    $this->line("  {$error}: " . implode(', ', $meta['users']));
+                }
+            }
             $this->newLine();
         }
 
@@ -169,8 +180,41 @@ class LikersCore extends Command
         $rows = $this->enrichRowsWithProfiles($rows, $profiles);
         $coreUsers = array_values(array_filter($rows, fn(array $r) => $r['core_member']));
 
+        $demographics = null;
+        if ($this->option('demographics')) {
+            $this->info('Получение демографических данных...');
+            $demoFields = ['bdate', 'sex'];
+            $demoProfiles = $usersService->getByIds($allIds, $demoFields);
+            $demographics = $this->computeDemographics($rows, $demoProfiles, $k);
+        }
+
+        // Сохраняем сегменты для продольного анализа (core-transitions)
+        if (Schema::hasTable('user_post_segments')) {
+            $segments = [];
+            foreach ($rows as $r) {
+                $seg = 'open';
+                if (isset($r['core_member']) && $r['core_member']) {
+                    $seg = 'core';
+                } elseif (!$r['friends_data_available']) {
+                    $seg = 'hidden';
+                }
+                $segments[] = [
+                    'user_id' => $r['user_id'],
+                    'owner_id' => $owner,
+                    'post_id' => $postId,
+                    'segment' => $seg,
+                    'friends_in_likers_count' => $r['friends_in_likers_count'] ?? 0,
+                ];
+            }
+            DB::table('user_post_segments')->upsert(
+                $segments,
+                ['owner_id', 'post_id', 'user_id'],
+                ['segment', 'friends_in_likers_count']
+            );
+        }
+
         $result = [
-            'post' => ['owner_id' => $owner, 'post_id' => $postId],
+            'post' => ['owner_id' => $owner, 'post_id' => $postId, 'views' => $postViews],
             'settings' => ['k' => $k, 'max_users' => $maxUsers, 'delay' => $delay],
             'summary' => [
                 'analyzed_likers' => count($rows),
@@ -180,6 +224,7 @@ class LikersCore extends Command
             ],
             'core_users' => $coreUsers,
             'users' => $rows,
+            'demographics' => $demographics,
         ];
 
         $outputPath = $this->option('output');
@@ -264,10 +309,16 @@ class LikersCore extends Command
         $post = $result['post'];
         $k = $result['settings']['k'];
 
+        $views = $post['views'] ?? 0;
+        $likes = $summary['analyzed_likers'];
+        $erv = $views > 0 ? round($likes / $views * 100, 2) . '%' : 'N/A';
+
         $this->info("Пост: {$post['owner_id']}_{$post['post_id']}");
         $this->info("Порог ядра k: {$k}");
         $this->table(['Показатель', 'Значение'], [
-            ['Лайкнувших проанализировано', $summary['analyzed_likers']],
+            ['Лайкнувших проанализировано', $likes],
+            ['Просмотров поста', $views],
+            ['ERv (лайки / просмотры)', $erv],
             ['Пользователей в ядре', $summary['core_users_count']],
             ['Ошибок чтения друзей', $summary['friend_data_errors']],
         ]);
@@ -290,6 +341,10 @@ class LikersCore extends Command
             ['user_id', 'name', 'screen_name', 'friends_in_likers_count', 'friends_data_available'],
             $rows
         );
+
+        if (!empty($result['demographics'])) {
+            $this->displayDemographics($result['demographics']);
+        }
     }
 
     private function formatForFile(array $result, string $format): string
@@ -410,8 +465,10 @@ class LikersCore extends Command
         }
 
         $message = trim($errorMessage);
-        if (mb_strlen($message) > 180) {
-            $message = mb_substr($message, 0, 180) . '...';
+        // Strip user-specific IDs to group similar errors
+        $message = preg_replace('/for user \d+/', 'for user *', $message);
+        if (mb_strlen($message) > 120) {
+            $message = mb_substr($message, 0, 120) . '...';
         }
 
         return $message;
@@ -448,6 +505,152 @@ class LikersCore extends Command
         unset($row);
 
         return $rows;
+    }
+
+    private function computeDemographics(array $rows, array $demoProfiles, int $k): array
+    {
+        $segments = ['core' => [], 'hidden' => [], 'open' => []];
+
+        foreach ($rows as $r) {
+            $uid = (int) $r['user_id'];
+            if ($r['core_member']) {
+                $segments['core'][] = $uid;
+            } elseif (!$r['friends_data_available']) {
+                $segments['hidden'][] = $uid;
+            } else {
+                $segments['open'][] = $uid;
+            }
+        }
+
+        // Проверка целостности: сегменты взаимоисключающие, покрывают всех
+        $totalSegments = count($segments['core']) + count($segments['hidden']) + count($segments['open']);
+        $coreHiddenOverlap = array_intersect($segments['core'], $segments['hidden']);
+        $coreOpenOverlap = array_intersect($segments['core'], $segments['open']);
+        $hiddenOpenOverlap = array_intersect($segments['hidden'], $segments['open']);
+        if ($totalSegments !== count($rows)
+            || $coreHiddenOverlap || $coreOpenOverlap || $hiddenOpenOverlap) {
+            throw new \RuntimeException(sprintf(
+                'Integrity: segments=%d rows=%d, overlaps: core∩hidden=%d core∩open=%d hidden∩open=%d',
+                $totalSegments, count($rows),
+                count($coreHiddenOverlap), count($coreOpenOverlap), count($hiddenOpenOverlap)
+            ));
+        }
+
+        $result = [];
+        foreach ($segments as $seg => $userIds) {
+            $stats = $this->segmentDemographics($userIds, $demoProfiles);
+            $stats['count'] = count($userIds);
+            $stats['user_ids'] = $userIds;
+            $result[$seg] = $stats;
+        }
+
+        return $result;
+    }
+
+    private function segmentDemographics(array $userIds, array $profiles): array
+    {
+        $male = 0;
+        $female = 0;
+        $unknownSex = 0;
+        $withAge = 0;
+        $noAge = 0;
+        $profilesUnavailable = 0;
+        $ageSum = 0;
+        $ageCount = 0;
+
+        foreach ($userIds as $uid) {
+            $p = $profiles[$uid] ?? null;
+            if (!is_array($p)) {
+                $profilesUnavailable++;
+                continue;
+            }
+
+            $sex = (int) ($p['sex'] ?? 0);
+            if ($sex === 2) {
+                $male++;
+            } elseif ($sex === 1) {
+                $female++;
+            } else {
+                $unknownSex++;
+            }
+
+            $bdate = (string) ($p['bdate'] ?? '');
+            $year = $this->extractBirthYear($bdate);
+            if ($year !== null && $year > 1900) {
+                $withAge++;
+                $ageSum += (2026 - $year);
+                $ageCount++;
+            } else {
+                $noAge++;
+            }
+        }
+
+        return [
+            'male' => $male,
+            'female' => $female,
+            'unknown_sex' => $unknownSex,
+            'profiles_unavailable' => $profilesUnavailable,
+            'with_age' => $withAge,
+            'no_age' => $noAge,
+            'avg_age' => $ageCount > 0 ? round($ageSum / $ageCount, 1) : null,
+        ];
+    }
+
+    private function extractBirthYear(string $bdate): ?int
+    {
+        if ($bdate === '') {
+            return null;
+        }
+        $parts = explode('.', $bdate);
+        if (count($parts) >= 3) {
+            return (int) $parts[2];
+        }
+        return null;
+    }
+
+    private function displayDemographics(array $demo): void
+    {
+        $this->newLine();
+        $this->info('=== Демография ===');
+        $this->line('(доли указаны от числа профилей с известными данными; профили без данных — отдельная колонка)');
+        $this->newLine();
+
+        $rows = [];
+        $labels = ['core' => 'Ядро (k≥2)', 'hidden' => 'Скрытые', 'open' => 'Открытые'];
+
+        foreach (['core', 'hidden', 'open'] as $seg) {
+            $d = $demo[$seg] ?? null;
+            if (!$d || $d['count'] === 0) {
+                continue;
+            }
+            $total = $d['count'];
+            $knownSex = $d['male'] + $d['female'];
+            $knownAge = $d['with_age'] + $d['no_age'];
+            $unavail = $d['profiles_unavailable'] ?? 0;
+
+            $pctTotal = fn(int $n) => $total > 0 ? round($n / $total * 100) . '%' : '-';
+            $pctSex = fn(int $n) => $knownSex > 0 ? round($n / $knownSex * 100) . '%' : '-';
+            $pctAge = fn(int $n) => $knownAge > 0 ? round($n / $knownAge * 100) . '%' : '-';
+
+            $rows[] = [
+                $labels[$seg],
+                $total,
+                $d['male'] . ' / ' . $d['female'] . ($d['unknown_sex'] > 0 ? ' (+' . $d['unknown_sex'] . ' ?)' : ''),
+                $pctSex($d['female']),
+                $pctTotal($d['with_age']),
+                $d['avg_age'] !== null ? $d['avg_age'] : '-',
+                $d['no_age'] . ' (' . $pctAge($d['no_age']) . ')',
+                $unavail > 0 ? $unavail . ' (' . $pctTotal($unavail) . ')' : '-',
+            ];
+        }
+
+        $this->table(
+            ['Сегмент', 'Всего', '♂ / ♀', '♀ доля*', 'с возр.', 'ср. возр.', 'скрыли возр.**', 'нет профиля'],
+            $rows
+        );
+
+        $this->line('*  ♀ доля — от числа профилей с известным полом (♂+♀)');
+        $this->line('** скрыли возр. — от числа профилей с известной датой рождения (с возр.+скрыли)');
     }
 }
 
