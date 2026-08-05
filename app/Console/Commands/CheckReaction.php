@@ -98,11 +98,12 @@ class CheckReaction extends Command
                 $groupId = $meta->object_id;
                 $likes = $post->likes->count ?? 0;
                 $reposts = $post->reposts->count ?? 0;
+                $views = $post->views->count ?? 0;
                 $membersCount = is_object($group) ? ($group->members_count ?? 0) : ($group['members_count'] ?? 0);
                 $postDate = $post->date ?? null;
                 
                 // Сохраняем в БД
-                $this->saveToCache($groupName, $groupId, $postText, $likes, $reposts, $membersCount, $postDate);
+                $this->saveToCache($groupName, $groupId, $postText, $likes, $reposts, $views, $membersCount, $postDate);
                 
                 // Добавляем в массив для вывода
                 $data[] = [
@@ -111,6 +112,7 @@ class CheckReaction extends Command
                     $groupId,
                     $likes,
                     $reposts,
+                    $views,
                     $membersCount,
                     $postDate
                 ];             
@@ -255,7 +257,7 @@ class CheckReaction extends Command
      * @param int|null $postDate Unix timestamp даты публикации поста
      * @return void
      */
-    private function saveToCache(string $groupName, int $groupId, string $postText, int $likes, int $reposts, int $membersCount = 0, ?int $postDate = null): void
+    private function saveToCache(string $groupName, int $groupId, string $postText, int $likes, int $reposts, int $views = 0, int $membersCount = 0, ?int $postDate = null): void
     {
         try {
             if (!Schema::hasTable('vk_check_cache')) {
@@ -270,6 +272,7 @@ class CheckReaction extends Command
                 'post_date' => $postDate,
                 'likes' => $likes,
                 'reposts' => $reposts,
+                'views' => $views,
                 'members_count' => $membersCount,
                 'cached_at' => now(),
                 'created_at' => now(),
@@ -349,8 +352,9 @@ class CheckReaction extends Command
                 'group_id' => $row[2] ?? 0,
                 'likes' => $row[3] ?? 0,
                 'reposts' => $row[4] ?? 0,
-                'members_count' => $row[5] ?? 0,
-                'post_date' => $row[6] ?? null,
+                'views' => $row[5] ?? 0,
+                'members_count' => $row[6] ?? 0,
+                'post_date' => $row[7] ?? null,
             ];
         }
         return $structured;
@@ -435,12 +439,13 @@ class CheckReaction extends Command
                 $row['group_id'],
                 $row['likes'],
                 $row['reposts'],
+                $row['views'] ?? 0,
                 number_format($row['members_count'], 0, ',', ' '),
                 $this->formatTimeSincePost($row['post_date'] ?? null),
             ];
         }
         
-        $this->table(['Post', 'Group name', 'Group ID', 'Likes', 'Reposts', 'Подписчики', 'Время с публикации'], $tableData);
+        $this->table(['Post', 'Group name', 'Group ID', 'Likes', 'Reposts', 'Views', 'Подписчики', 'Время с публикации'], $tableData);
     }
 
     /**
@@ -459,6 +464,7 @@ class CheckReaction extends Command
                 'group_id' => $row['group_id'],
                 'likes' => $row['likes'],
                 'reposts' => $row['reposts'],
+                'views' => $row['views'] ?? 0,
                 'members_count' => $row['members_count'],
                 'post_date' => $row['post_date'] ?? null,
                 'time_since_post' => $this->formatTimeSincePost($row['post_date'] ?? null),
@@ -489,7 +495,7 @@ class CheckReaction extends Command
         fwrite($output, "\xEF\xBB\xBF");
         
         // Заголовки
-        fputcsv($output, ['post_text', 'group_name', 'group_id', 'likes', 'reposts', 'members_count', 'time_since_post']);
+        fputcsv($output, ['post_text', 'group_name', 'group_id', 'likes', 'reposts', 'views', 'members_count', 'time_since_post']);
 
         // Данные
         foreach ($data as $row) {
@@ -499,6 +505,7 @@ class CheckReaction extends Command
                 $row['group_id'],
                 $row['likes'],
                 $row['reposts'],
+                $row['views'] ?? 0,
                 $row['members_count'],
                 $this->formatTimeSincePost($row['post_date'] ?? null),
             ]);
@@ -528,8 +535,8 @@ class CheckReaction extends Command
         }
         
         $output .= "## Результаты\n\n";
-        $output .= "| Post | Group name | Group ID | Likes | Reposts | Подписчики | Время с публикации |\n";
-        $output .= "|------|------------|----------|-------|----------|------------|-------------------|\n";
+        $output .= "| Post | Group name | Group ID | Likes | Reposts | Views | Подписчики | Время с публикации |\n";
+        $output .= "|------|------------|----------|-------|----------|-------|------------|-------------------|\n";
         
         foreach ($data as $row) {
             $postText = $row['post_text'] ?: '(без текста)';
@@ -544,12 +551,13 @@ class CheckReaction extends Command
             $timeSince = $this->formatTimeSincePost($row['post_date'] ?? null);
             
             $output .= sprintf(
-                "| %s | %s | %d | %d | %d | %s | %s |\n",
+                "| %s | %s | %d | %d | %d | %d | %s | %s |\n",
                 $postText,
                 $groupName,
                 $row['group_id'],
                 $row['likes'],
                 $row['reposts'],
+                $row['views'] ?? 0,
                 number_format($row['members_count'], 0, ',', ' '),
                 $timeSince
             );
