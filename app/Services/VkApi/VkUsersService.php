@@ -8,6 +8,8 @@ namespace App\Services\VkApi;
  */
 class VkUsersService
 {
+    private const USERS_PER_REQUEST = 100;
+
     private ?VkSdkAdapter $adapter = null;
 
     /**
@@ -35,9 +37,10 @@ class VkUsersService
      *
      * @param array<int> $userIds
      * @param array<string> $fields
+     * @param float $delaySeconds Delay between batch requests (not before the first)
      * @return array<int, array<string, mixed>>
      */
-    public function getByIds(array $userIds, array $fields = ['screen_name']): array
+    public function getByIds(array $userIds, array $fields = ['screen_name'], float $delaySeconds = 0.0): array
     {
         $userIds = array_values(array_unique(array_map('intval', $userIds)));
         if (empty($userIds)) {
@@ -47,9 +50,13 @@ class VkUsersService
         $adapter = $this->getAdapter();
         $profiles = [];
 
-        // users.get supports up to 1000 ids per call
-        $chunks = array_chunk($userIds, 1000);
-        foreach ($chunks as $chunk) {
+        // Conservatively batch users.get: large user_ids lists are truncated by VK
+        $chunks = array_chunk($userIds, self::USERS_PER_REQUEST);
+        foreach ($chunks as $index => $chunk) {
+            if ($index > 0 && $delaySeconds > 0) {
+                usleep((int) ($delaySeconds * 1_000_000));
+            }
+
             try {
                 $result = $adapter->execute(function () use ($adapter, $chunk, $fields) {
                     return $adapter->users()->get(

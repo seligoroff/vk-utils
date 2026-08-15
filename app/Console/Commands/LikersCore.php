@@ -89,8 +89,15 @@ class LikersCore extends Command
             return 0;
         }
 
-        if (count($likers) > $maxUsers) {
-            $this->warn("Лайкнувших: " . count($likers) . ". Будут обработаны первые {$maxUsers} пользователей.");
+        $totalLikers = count($likers);
+        $coverage = $this->buildSampleCoverage($totalLikers, $maxUsers);
+        $sampleTruncated = $coverage['sample_truncated'];
+        $analyzedLikers = $coverage['analyzed_likers'];
+        $omittedLikers = $coverage['omitted_likers'];
+        $sampleCoveragePercent = $coverage['sample_coverage_percent'];
+
+        if ($sampleTruncated) {
+            $this->warn("Лайкнувших: {$totalLikers}. Будут обработаны первые {$maxUsers} пользователей (не случайная выборка).");
             $likers = array_slice($likers, 0, $maxUsers);
         }
 
@@ -176,16 +183,27 @@ class LikersCore extends Command
         $coreUsers = array_values(array_filter($rows, fn(array $r) => $r['core_member']));
 
         $allIds = array_map(fn(array $r) => (int) $r['user_id'], $rows);
-        $profiles = $usersService->getByIds($allIds, ['screen_name']);
+        $withDemographics = (bool) $this->option('demographics');
+        $fields = $this->resolveProfileFields($withDemographics);
+        if ($withDemographics) {
+            $this->info('Получение профилей и демографических данных...');
+        }
+
+        $profiles = $usersService->getByIds($allIds, $fields, $delay);
+
+        $profilesMeta = $this->buildProfilesMeta(count($allIds), count($profiles));
+        $requested = $profilesMeta['requested'];
+        $received = $profilesMeta['received'];
+        if ($requested > 0 && $received / $requested < 0.9) {
+            $this->warn("Получено профилей: {$received} из {$requested}. Демография может быть смещена.");
+        }
+
         $rows = $this->enrichRowsWithProfiles($rows, $profiles);
         $coreUsers = array_values(array_filter($rows, fn(array $r) => $r['core_member']));
 
         $demographics = null;
-        if ($this->option('demographics')) {
-            $this->info('Получение демографических данных...');
-            $demoFields = ['bdate', 'sex'];
-            $demoProfiles = $usersService->getByIds($allIds, $demoFields);
-            $demographics = $this->computeDemographics($rows, $demoProfiles, $k);
+        if ($withDemographics) {
+            $demographics = $this->computeDemographics($rows, $profiles, $k);
         }
 
         // Сохраняем сегменты для продольного анализа (core-transitions)
@@ -217,11 +235,16 @@ class LikersCore extends Command
             'post' => ['owner_id' => $owner, 'post_id' => $postId, 'views' => $postViews],
             'settings' => ['k' => $k, 'max_users' => $maxUsers, 'delay' => $delay],
             'summary' => [
-                'analyzed_likers' => count($rows),
+                'total_likers' => $totalLikers,
+                'analyzed_likers' => $analyzedLikers,
+                'omitted_likers' => $omittedLikers,
+                'sample_coverage_percent' => $sampleCoveragePercent,
+                'sample_truncated' => $sampleTruncated,
                 'core_users_count' => count($coreUsers),
                 'friend_data_errors' => $friendErrors,
                 'friend_error_types' => $this->flattenErrorStats($errorStats),
             ],
+            'profiles' => $profilesMeta,
             'core_users' => $coreUsers,
             'users' => $rows,
             'demographics' => $demographics,
@@ -310,13 +333,23 @@ class LikersCore extends Command
         $k = $result['settings']['k'];
 
         $views = $post['views'] ?? 0;
-        $likes = $summary['analyzed_likers'];
-        $erv = $views > 0 ? round($likes / $views * 100, 2) . '%' : 'N/A';
+        $likesForErv = $summary['total_likers'] ?? $summary['analyzed_likers'];
+        $erv = $this->formatErv((int) $likesForErv, (int) $views);
 
         $this->info("Пост: {$post['owner_id']}_{$post['post_id']}");
         $this->info("Порог ядра k: {$k}");
+
+        if (!empty($summary['sample_truncated'])) {
+            $this->warn(
+                "Обработаны первые {$summary['analyzed_likers']} лайкнувших (порядок API), это не гарантированно случайная выборка."
+            );
+        }
+
         $this->table(['Показатель', 'Значение'], [
-            ['Лайкнувших проанализировано', $likes],
+            ['Всего лайкнувших', $summary['total_likers'] ?? $summary['analyzed_likers']],
+            ['Лайкнувших проанализировано', $summary['analyzed_likers']],
+            ['Не обработано', $summary['omitted_likers'] ?? 0],
+            ['Покрытие выборки', ($summary['sample_coverage_percent'] ?? 100) . '%'],
             ['Просмотров поста', $views],
             ['ERv (лайки / просмотры)', $erv],
             ['Пользователей в ядре', $summary['core_users_count']],
@@ -383,11 +416,18 @@ class LikersCore extends Command
         }
 
         // markdown
+        $summary = $result['summary'];
         $out = "# Ядро лайкнувших\n\n";
         $out .= "- Пост: `{$result['post']['owner_id']}_{$result['post']['post_id']}`\n";
         $out .= "- Порог k: `{$result['settings']['k']}`\n";
-        $out .= "- Лайкнувших проанализировано: `{$result['summary']['analyzed_likers']}`\n";
-        $out .= "- Пользователей в ядре: `{$result['summary']['core_users_count']}`\n\n";
+        $out .= "- Всего лайкнувших: `{$summary['total_likers']}`\n";
+        $out .= "- Лайкнувших проанализировано: `{$summary['analyzed_likers']}`\n";
+        $out .= "- Не обработано: `{$summary['omitted_likers']}`\n";
+        $out .= "- Покрытие выборки: `{$summary['sample_coverage_percent']}%`\n";
+        if (!empty($summary['sample_truncated'])) {
+            $out .= "- Внимание: обработаны первые {$summary['analyzed_likers']} лайкнувших (порядок API), это не гарантированно случайная выборка.\n";
+        }
+        $out .= "- Пользователей в ядре: `{$summary['core_users_count']}`\n\n";
         $out .= "| user_id | name | screen_name | friends_in_likers_count | friends_data_available |\n";
         $out .= "|---:|---|---|---:|---:|\n";
         foreach ($result['core_users'] as $r) {
@@ -401,12 +441,19 @@ class LikersCore extends Command
 
     private function formatText(array $result): string
     {
+        $summary = $result['summary'];
         $out = "Ядро лайкнувших\n";
         $out .= "Пост: {$result['post']['owner_id']}_{$result['post']['post_id']}\n";
         $out .= "Порог k: {$result['settings']['k']}\n";
-        $out .= "Лайкнувших проанализировано: {$result['summary']['analyzed_likers']}\n";
-        $out .= "Пользователей в ядре: {$result['summary']['core_users_count']}\n";
-        $out .= "Ошибок чтения друзей: {$result['summary']['friend_data_errors']}\n\n";
+        $out .= "Всего лайкнувших: {$summary['total_likers']}\n";
+        $out .= "Лайкнувших проанализировано: {$summary['analyzed_likers']}\n";
+        $out .= "Не обработано: {$summary['omitted_likers']}\n";
+        $out .= "Покрытие выборки: {$summary['sample_coverage_percent']}%\n";
+        if (!empty($summary['sample_truncated'])) {
+            $out .= "Внимание: обработаны первые {$summary['analyzed_likers']} лайкнувших (порядок API), это не гарантированно случайная выборка.\n";
+        }
+        $out .= "Пользователей в ядре: {$summary['core_users_count']}\n";
+        $out .= "Ошибок чтения друзей: {$summary['friend_data_errors']}\n\n";
         foreach ($result['core_users'] as $r) {
             $out .= "- user_id={$r['user_id']}, name={$r['display_name']}, screen_name=" . ($r['screen_name'] ?: '-') . ", friends_in_likers_count={$r['friends_in_likers_count']}, friends_data_available=" . ($r['friends_data_available'] ? '1' : '0') . "\n";
         }
@@ -472,6 +519,61 @@ class LikersCore extends Command
         }
 
         return $message;
+    }
+
+    /**
+     * @return array{
+     *   total_likers:int,
+     *   analyzed_likers:int,
+     *   omitted_likers:int,
+     *   sample_coverage_percent:float,
+     *   sample_truncated:bool
+     * }
+     */
+    private function buildSampleCoverage(int $totalLikers, int $maxUsers): array
+    {
+        $sampleTruncated = $totalLikers > $maxUsers;
+        $analyzedLikers = $sampleTruncated ? $maxUsers : $totalLikers;
+        $omittedLikers = $totalLikers - $analyzedLikers;
+
+        return [
+            'total_likers' => $totalLikers,
+            'analyzed_likers' => $analyzedLikers,
+            'omitted_likers' => $omittedLikers,
+            'sample_coverage_percent' => $totalLikers > 0
+                ? round($analyzedLikers / $totalLikers * 100, 2)
+                : 100.0,
+            'sample_truncated' => $sampleTruncated,
+        ];
+    }
+
+    /**
+     * @return array{requested:int,received:int,unavailable:int}
+     */
+    private function buildProfilesMeta(int $requested, int $received): array
+    {
+        return [
+            'requested' => $requested,
+            'received' => $received,
+            'unavailable' => max(0, $requested - $received),
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function resolveProfileFields(bool $demographics): array
+    {
+        if ($demographics) {
+            return ['screen_name', 'bdate', 'sex'];
+        }
+
+        return ['screen_name'];
+    }
+
+    private function formatErv(int $totalLikers, int $views): string
+    {
+        return $views > 0 ? round($totalLikers / $views * 100, 2) . '%' : 'N/A';
     }
 
     /**
