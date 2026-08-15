@@ -61,6 +61,22 @@ php artisan vk:posts-get --owner=-12345678 --from=2024-01-01 --db --clear
 php artisan vk:posts-get --owner=-12345678 --from=2024-01-01 --min-likes=10
 ```
 
+## Просмотр постов из базы данных
+
+```bash
+# Прочитать посты хронологически, без запросов к VK API
+php artisan vk:posts-list --owner=-12345678 --from=2026-06-01 --to=2026-09-01
+
+# Получить полные тексты в JSON
+php artisan vk:posts-list --owner=-12345678 --from=2026-06-01 --to=2026-09-01 --limit=100 --format=json
+
+# Перейти ко второй странице
+php artisan vk:posts-list --owner=-12345678 --from=2026-06-01 --to=2026-09-01 --limit=50 --offset=50
+
+# Сохранить полный читаемый отчёт
+php artisan vk:posts-list --owner=-12345678 --from=2026-06-01 --to=2026-09-01 --format=markdown --full-text --output=reports/posts.md
+```
+
 ## Массовое получение постов для всех групп
 
 ```bash
@@ -263,5 +279,4 @@ php artisan vk:token-check --token=ваш_токен --format=json
    - ⬆️ - рост более 5%
    - ➡️ - стабильно (от -5% до +5%)
    - ⬇️ - падение более 5%
-
 

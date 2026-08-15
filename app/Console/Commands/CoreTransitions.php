@@ -2,15 +2,20 @@
 
 namespace App\Console\Commands;
 
+use App\Support\VkPostPeriod;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 class CoreTransitions extends Command
 {
     protected $signature = 'vk:core-transitions
-                            {--owner= : ID владельца стены (обязательный)}
-                            {--window=10 : Размер скользящего окна для устойчивого ядра}
-                            {--min-core-posts=2 : Минимальное число попаданий в ядро внутри окна}';
+                             {--owner= : ID владельца стены (обязательный)}
+                             {--window=10 : Размер скользящего окна для устойчивого ядра}
+                             {--min-core-posts=2 : Минимальное число попаданий в ядро внутри окна}
+                             {--from= : Нижняя граница дат постов (Y-m-d, опционально)}
+                             {--to= : Правая граница дат постов (Y-m-d, не включается)}
+                             {--posts-limit= : Максимальное число постов (по умолчанию все)}';
 
     protected $description = 'Продольный анализ переходов пользователей между сегментами';
 
@@ -25,17 +30,69 @@ class CoreTransitions extends Command
         $window = (int) $this->option('window');
         $minCorePosts = (int) $this->option('min-core-posts');
 
-        // Получаем сегменты для всех постов owner-а, сгруппированные по post_id
-        $rows = DB::table('user_post_segments as s')
-            ->join('vk_posts as p', function ($join) use ($ownerId) {
+        $from = $this->option('from');
+        $to = $this->option('to');
+        $postsLimit = $this->option('posts-limit');
+
+        try {
+            $fromTs = VkPostPeriod::fromInclusiveTimestamp($from !== null ? (string) $from : null);
+            $toTs = VkPostPeriod::toExclusiveTimestamp($to !== null ? (string) $to : null);
+        } catch (Throwable $e) {
+            $this->error('Ошибка парсинга периода: '.$e->getMessage());
+            return 1;
+        }
+
+        if ($fromTs !== null && $toTs !== null && $fromTs >= $toTs) {
+            $this->error('Дата начала периода должна быть раньше даты окончания');
+            return 1;
+        }
+
+        $limit = null;
+        if ($postsLimit !== null && $postsLimit !== '') {
+            $limit = (int) $postsLimit;
+            if ($limit < 1) {
+                $this->error('Параметр --posts-limit должен быть больше нуля');
+                return 1;
+            }
+        }
+
+        $postIdsQuery = DB::table('user_post_segments as s')
+            ->join('vk_posts as p', function ($join) {
                 $join->on('s.owner_id', '=', 'p.owner_id')
                      ->on('s.post_id', '=', 'p.post_id');
             })
             ->where('s.owner_id', $ownerId)
-            ->select('s.user_id', 's.post_id', 's.segment', 'p.date')
+            ->select('p.post_id')
+            ->groupBy('p.post_id', 'p.date')
             ->orderBy('p.date')
-            ->orderBy('s.post_id')
-            ->get();
+            ->orderBy('p.post_id');
+
+        if ($fromTs !== null) {
+            $postIdsQuery->where('p.timestamp', '>=', $fromTs);
+        }
+        if ($toTs !== null) {
+            $postIdsQuery->where('p.timestamp', '<', $toTs);
+        }
+        if ($limit !== null) {
+            $postIdsQuery->limit($limit);
+        }
+
+        $limitedPostIds = $postIdsQuery->pluck('post_id');
+
+        $rows = collect();
+        if ($limitedPostIds->isNotEmpty()) {
+            $rows = DB::table('user_post_segments as s')
+                ->join('vk_posts as p', function ($join) {
+                    $join->on('s.owner_id', '=', 'p.owner_id')
+                         ->on('s.post_id', '=', 'p.post_id');
+                })
+                ->where('s.owner_id', $ownerId)
+                ->whereIn('s.post_id', $limitedPostIds)
+                ->select('s.user_id', 's.post_id', 's.segment', 'p.date')
+                ->orderBy('p.date')
+                ->orderBy('s.post_id')
+                ->get();
+        }
 
         if ($rows->isEmpty()) {
             $this->warn("Нет данных для owner_id={$ownerId}. Запустите vk:likers-core для нескольких постов этой группы.");
@@ -51,7 +108,11 @@ class CoreTransitions extends Command
 
         $postIds = array_keys($posts);
         $postCount = count($postIds);
-        $this->info("Постов проанализировано: {$postCount}");
+        $periodInfo = '';
+        if ($from || $to) {
+            $periodInfo = ' (период: ' . ($from ?: '...') . ' – ' . ($to ?: '...') . ')';
+        }
+        $this->info("Постов проанализировано: {$postCount}{$periodInfo}");
 
         if ($postCount < 2) {
             $this->warn('Нужно минимум 2 поста для построения переходов.');

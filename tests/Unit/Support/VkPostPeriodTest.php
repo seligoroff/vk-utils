@@ -30,4 +30,15 @@ class VkPostPeriodTest extends TestCase
         $this->assertTrue($year2026->containsTimestamp($jan2026));
         $this->assertFalse($year2026->containsTimestamp($dec2025));
     }
+
+    public function test_optional_bounds_parse_date_only_to_as_exclusive(): void
+    {
+        $from = VkPostPeriod::fromInclusiveTimestamp('2026-06-01');
+        $to = VkPostPeriod::toExclusiveTimestamp('2026-08-01');
+
+        $this->assertSame(Carbon::parse('2026-06-01 00:00:00')->timestamp, $from);
+        $this->assertSame(Carbon::parse('2026-08-01 00:00:00')->timestamp, $to);
+        $this->assertNull(VkPostPeriod::fromInclusiveTimestamp(null));
+        $this->assertNull(VkPostPeriod::toExclusiveTimestamp(''));
+    }
 }

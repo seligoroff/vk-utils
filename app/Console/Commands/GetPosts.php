@@ -363,12 +363,13 @@ class GetPosts extends Command
                 $post->likes->count ?? 0,
                 $post->reposts->count ?? 0,
                 $post->comments->count ?? 0,
+                $post->views->count ?? 0,
                 VkUrlBuilder::wallPost($this->option('owner'), $post->id),
             ];
         }
 
         $this->table(
-            ['Date', 'Text', 'Likes', 'Reposts', 'Comments', 'URL'],
+            ['Date', 'Text', 'Likes', 'Reposts', 'Comments', 'Views', 'URL'],
             $data
         );
 
@@ -393,6 +394,7 @@ class GetPosts extends Command
                 'likes' => $post->likes->count ?? 0,
                 'reposts' => $post->reposts->count ?? 0,
                 'comments' => $post->comments->count ?? 0,
+                'views' => $post->views->count ?? 0,
                 'url' => VkUrlBuilder::wallPost($this->option('owner'), $post->id),
             ];
         }
@@ -418,7 +420,7 @@ class GetPosts extends Command
         $output = fopen('php://temp', 'r+');
         
         // Заголовки
-        fputcsv($output, ['date', 'text', 'likes', 'reposts', 'comments', 'url']);
+        fputcsv($output, ['date', 'text', 'likes', 'reposts', 'comments', 'views', 'url']);
 
         // Данные
         foreach ($posts as $post) {
@@ -428,6 +430,7 @@ class GetPosts extends Command
                 $post->likes->count ?? 0,
                 $post->reposts->count ?? 0,
                 $post->comments->count ?? 0,
+                $post->views->count ?? 0,
                 VkUrlBuilder::wallPost($this->option('owner'), $post->id),
             ]);
         }
@@ -532,6 +535,7 @@ class GetPosts extends Command
         $updated = 0;
         $skipped = 0;
         $updateMode = $this->option('update');
+        $hasViews = Schema::hasColumn('vk_posts', 'views');
         $progressBar = $this->output->createProgressBar(count($posts));
         $progressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%%');
         $progressBar->start();
@@ -551,6 +555,10 @@ class GetPosts extends Command
                         'url' => VkUrlBuilder::wallPost($this->option('owner'), $post->id),
                         'updated_at' => Carbon::now(),
                     ];
+
+                    if ($hasViews) {
+                        $postData['views'] = $post->views->count ?? 0;
+                    }
                     
                     if ($updateMode) {
                         // Режим обновления: обновляем существующие, вставляем новые
@@ -623,11 +631,13 @@ class GetPosts extends Command
         $totalLikes = 0;
         $totalReposts = 0;
         $totalComments = 0;
+        $totalViews = 0;
 
         foreach ($posts as $post) {
             $totalLikes += $post->likes->count ?? 0;
             $totalReposts += $post->reposts->count ?? 0;
             $totalComments += $post->comments->count ?? 0;
+            $totalViews += $post->views->count ?? 0;
         }
 
         $count = count($posts);
@@ -638,6 +648,7 @@ class GetPosts extends Command
         $this->line("- Среднее лайков: " . round($totalLikes / $count, 2));
         $this->line("- Среднее репостов: " . round($totalReposts / $count, 2));
         $this->line("- Среднее комментариев: " . round($totalComments / $count, 2));
+        $this->line("- Среднее просмотров: " . round($totalViews / $count, 2));
     }
 }
 

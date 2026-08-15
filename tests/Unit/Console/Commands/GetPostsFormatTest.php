@@ -117,6 +117,7 @@ class GetPostsFormatTest extends TestCase
         $this->assertEquals(10, $post['likes']);
         $this->assertEquals(5, $post['reposts']);
         $this->assertEquals(3, $post['comments']);
+        $this->assertEquals(0, $post['views']);
         $this->assertStringContainsString('wall-12345678_123', $post['url']);
     }
 
@@ -191,7 +192,7 @@ class GetPostsFormatTest extends TestCase
         
         // Проверяем заголовки
         $headers = str_getcsv($lines[0]);
-        $expectedHeaders = ['date', 'text', 'likes', 'reposts', 'comments', 'url'];
+        $expectedHeaders = ['date', 'text', 'likes', 'reposts', 'comments', 'views', 'url'];
         $this->assertEquals($expectedHeaders, $headers);
         
         // Проверяем данные
@@ -201,7 +202,8 @@ class GetPostsFormatTest extends TestCase
         $this->assertEquals('10', $data[2]);
         $this->assertEquals('5', $data[3]);
         $this->assertEquals('3', $data[4]);
-        $this->assertStringContainsString('wall-12345678_123', $data[5]);
+        $this->assertEquals('0', $data[5]);
+        $this->assertStringContainsString('wall-12345678_123', $data[6]);
     }
 
     /**

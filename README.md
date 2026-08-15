@@ -71,6 +71,9 @@ php artisan vk:groups-info
 # Получение постов за период
 php artisan vk:posts-get --owner=-12345678 --from=2024-01-01
 
+# Просмотр сохранённых постов без обращения к VK API
+php artisan vk:posts-list --owner=-12345678 --from=2024-01-01 --to=2024-02-01
+
 # Получение постов для всех групп из vk-groups.csv
 php artisan vk:posts-get-all --from="last month"
 

@@ -51,6 +51,20 @@ class VkPostPeriod
         return new self($fromInclusive, $toExclusive);
     }
 
+    public static function fromInclusiveTimestamp(?string $from): ?int
+    {
+        $from = trim((string) $from);
+
+        return $from === '' ? null : self::parseFromBoundary($from);
+    }
+
+    public static function toExclusiveTimestamp(?string $to): ?int
+    {
+        $to = trim((string) $to);
+
+        return $to === '' ? null : self::parseToExclusiveBoundary($to);
+    }
+
     private static function parseFromBoundary(string $dateString): int
     {
         $dateString = trim(strtolower($dateString));

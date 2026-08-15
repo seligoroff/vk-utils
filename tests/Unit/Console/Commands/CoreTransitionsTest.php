@@ -3,6 +3,8 @@
 namespace Tests\Unit\Console\Commands;
 
 use App\Console\Commands\CoreTransitions;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use ReflectionMethod;
@@ -31,6 +33,7 @@ class CoreTransitionsTest extends TestCase
                 $table->id();
                 $table->integer('post_id');
                 $table->string('owner_id', 32);
+                $table->integer('timestamp')->default(0);
                 $table->timestamp('date');
                 $table->text('text')->nullable();
                 $table->integer('likes')->default(0);
@@ -124,7 +127,48 @@ class CoreTransitionsTest extends TestCase
         $this->assertEquals(0, $result[0]['stable_core_count'], 'no user meets min 2 core in window');
     }
 
-    private function seedSegments(string $ownerId, int $postId, array $users): void
+    public function test_handle_excludes_to_date_and_applies_posts_limit_in_query(): void
+    {
+        $owner = '-670335';
+        $this->seedSegments($owner, 1, [['user_id' => 1, 'segment' => 'core']], '2026-05-31 12:00:00');
+        $this->seedSegments($owner, 2, [['user_id' => 1, 'segment' => 'core']], '2026-06-01 12:00:00');
+        $this->seedSegments($owner, 3, [['user_id' => 1, 'segment' => 'open']], '2026-07-15 12:00:00');
+        $this->seedSegments($owner, 4, [['user_id' => 1, 'segment' => 'core']], '2026-08-01 12:00:00');
+
+        $exitCode = Artisan::call('vk:core-transitions', [
+            '--owner' => $owner,
+            '--from' => '2026-06-01',
+            '--to' => '2026-08-01',
+        ]);
+
+        $this->assertSame(0, $exitCode);
+        $this->assertStringContainsString('Постов проанализировано: 2', Artisan::output());
+
+        $exitCode = Artisan::call('vk:core-transitions', [
+            '--owner' => $owner,
+            '--from' => '2026-06-01',
+            '--to' => '2026-08-01',
+            '--posts-limit' => 1,
+        ]);
+
+        $this->assertSame(0, $exitCode);
+        $output = Artisan::output();
+        $this->assertStringContainsString('Постов проанализировано: 1', $output);
+        $this->assertStringContainsString('Нужно минимум 2 поста', $output);
+    }
+
+    public function test_handle_rejects_non_positive_posts_limit(): void
+    {
+        $exitCode = Artisan::call('vk:core-transitions', [
+            '--owner' => '-670335',
+            '--posts-limit' => 0,
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('--posts-limit должен быть больше нуля', Artisan::output());
+    }
+
+    private function seedSegments(string $ownerId, int $postId, array $users, ?string $date = null): void
     {
         foreach ($users as $u) {
             DB::table('user_post_segments')->insert([
@@ -138,10 +182,13 @@ class CoreTransitionsTest extends TestCase
             ]);
         }
 
+        $postedAt = $date ? Carbon::parse($date) : now()->addDays($postId);
+
         DB::table('vk_posts')->insert([
             'post_id' => $postId,
             'owner_id' => $ownerId,
-            'date' => now()->addDays($postId),
+            'timestamp' => $postedAt->timestamp,
+            'date' => $postedAt->toDateTimeString(),
             'text' => "post {$postId}",
             'likes' => count($users),
             'created_at' => now(),

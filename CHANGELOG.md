@@ -5,6 +5,21 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 и проект следует [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+## [0.11.0] - 2026-08-15
+
+### Добавлено
+- `vk:posts-list` — просмотр сохранённых постов владельца за период с пагинацией и форматами table/JSON/CSV/Markdown
+- `vk:early-posts` — поиск ранних постов с низким количеством репостов для ротации контента
+- `vk:post-delete` — удаление поста из БД после републикации
+- Миграция `add_views_to_vk_posts_table` — колонка `views` в `vk_posts` (nullable; существующая колонка не меняется)
+
+### Изменено
+- `vk:posts-get` — просмотры в table/JSON/CSV, статистике и при сохранении в БД (колонка пишется только если есть в схеме)
+- `vk:core-transitions` — опции `--from`, `--to` (правая граница не включается, как у `vk:posts-get`) и `--posts-limit` на уровне SQL
+- `VkPostPeriod` — публичные границы `fromInclusiveTimestamp` / `toExclusiveTimestamp` для опционального периода
+
 ## [0.10.0] - 2026-08-04
 
 ### Добавлено
@@ -358,4 +373,3 @@
 - Базовый функционал работы с VK API
 - Команды для работы с группами и постами
 - Конфигурация через `.env` файл
-
