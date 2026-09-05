@@ -64,6 +64,7 @@ class CheckReactionFormatTest extends TestCase
                 'group_id' => 12345678,
                 'likes' => 10,
                 'reposts' => 5,
+                'views' => 100,
                 'members_count' => 1000,
                 'post_date' => time() - 3600, // 1 час назад
             ],
@@ -73,6 +74,7 @@ class CheckReactionFormatTest extends TestCase
                 'group_id' => 87654321,
                 'likes' => 20,
                 'reposts' => 3,
+                'views' => 250,
                 'members_count' => 2000,
                 'post_date' => time() - 7200, // 2 часа назад
             ],
@@ -137,7 +139,7 @@ class CheckReactionFormatTest extends TestCase
         
         // Проверяем заголовки
         $headers = str_getcsv($lines[0]);
-        $expectedHeaders = ['post_text', 'group_name', 'group_id', 'likes', 'reposts', 'members_count', 'time_since_post'];
+        $expectedHeaders = ['post_text', 'group_name', 'group_id', 'likes', 'reposts', 'views', 'members_count', 'time_since_post'];
         $this->assertEquals($expectedHeaders, $headers);
         
         // Проверяем данные первой строки
@@ -147,6 +149,7 @@ class CheckReactionFormatTest extends TestCase
         $this->assertEquals('12345678', $dataRow[2]);
         $this->assertEquals('10', $dataRow[3]);
         $this->assertEquals('5', $dataRow[4]);
+        $this->assertEquals('100', $dataRow[5]);
     }
 
     /**
@@ -165,7 +168,7 @@ class CheckReactionFormatTest extends TestCase
         // Должен быть только заголовок
         $this->assertCount(1, $lines);
         $headers = str_getcsv($lines[0]);
-        $this->assertEquals(['post_text', 'group_name', 'group_id', 'likes', 'reposts', 'members_count', 'time_since_post'], $headers);
+        $this->assertEquals(['post_text', 'group_name', 'group_id', 'likes', 'reposts', 'views', 'members_count', 'time_since_post'], $headers);
     }
 
     /**
@@ -208,7 +211,7 @@ class CheckReactionFormatTest extends TestCase
         $this->assertNotEmpty($markdown);
         $this->assertStringContainsString('# Проверка последних постов в группах VK', $markdown);
         $this->assertStringContainsString('## Результаты', $markdown);
-        $this->assertStringContainsString('| Post | Group name | Group ID | Likes | Reposts | Подписчики | Время с публикации |', $markdown);
+        $this->assertStringContainsString('| Post | Group name | Group ID | Likes | Reposts | Views | Подписчики | Время с публикации |', $markdown);
         $this->assertStringContainsString('Тестовый пост с текстом', $markdown);
         $this->assertStringContainsString('Test Group', $markdown);
         $this->assertStringContainsString('**Всего групп:** 2', $markdown);
