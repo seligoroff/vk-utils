@@ -220,6 +220,9 @@ php artisan vk:likers-core --owner=-12345678 --post=12345
 # Более плотное ядро (минимум 2 связи внутри лайкнувших)
 php artisan vk:likers-core --owner=-12345678 --post=12345 --k=2
 
+# Демография + сводка ошибок; при flood/rate-limit команда завершится с кодом 1 и без записи сегментов
+php artisan vk:likers-core --owner=-12345678 --post=12345 --k=2 --demographics --verbose-errors --delay=0.5
+
 # Сохранить подробный отчет в JSON
 php artisan vk:likers-core --owner=-12345678 --post=12345 --k=2 --format=json --output=reports/likers_core.json
 

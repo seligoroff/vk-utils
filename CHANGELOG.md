@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-05
+
 ### Добавлено
 - `vk:posts-find` — поиск сохранённых постов в `vk_posts` по `--db-id`, `--post-id` и/или `--text` без VK API
 - Типизация ошибок VK API (`VkErrorClassifier`, `VkRequestException`), retry/cooldown в `VkSdkAdapter` и circuit breaker в `vk:likers-core` без upsert при failed run

@@ -84,5 +84,17 @@ make migrate
 
 8. Создайте файл `resources/vk-groups.csv` со списком групп (или используйте `make vk-groups-file`)
 
+## Запуск тестов
+
+PHPUnit использует только SQLite `:memory:` из `tests/.env.testing` и не должен
+обращаться к рабочей MySQL. Подробности и устранение ошибок изоляции —
+в [Настройка тестов](testing.md).
+
+```bash
+vendor/bin/phpunit
+# или
+php artisan test
+```
+
 
 
