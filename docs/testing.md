@@ -1,84 +1,47 @@
 # Настройка тестов
 
-## Конфигурация базы данных для тестов
+## Контракт изоляции БД
 
-Приложение использует отдельный файл конфигурации `.env.testing` для тестов. Это позволяет использовать отдельную тестовую базу данных, не затрагивая основную.
+Тесты, которые создают приложение через `Tests\CreatesApplication` / `Tests\TestCase`,
+обязаны использовать только **SQLite `:memory:`** из `tests/.env.testing`.
 
-## Настройка .env.testing
+- Источник `DB_*` — файл `tests/.env.testing` (не `phpunit.xml` и не рабочий `.env`).
+- В `phpunit.xml` ключи `DB_CONNECTION` / `DB_DATABASE` намеренно не задаются.
+- При загрузке приложения все `DB_*` из testing-файла перекрывают переменные
+  окружения процесса (в том числе продовый MySQL из shell).
+- `DATABASE_URL` для тестов принудительно очищается.
+- Если итоговая конфигурация не SQLite `:memory:`, создание приложения
+  завершается ошибкой **до** подключения к БД, миграций и `RefreshDatabase`.
+- Защита не распространяется на ad-hoc `php artisan` / скрипты через
+  `bootstrap/app.php` без `CreatesApplication` — destructive SQL в них запрещён.
 
-Создайте файл `.env.testing` в папке `tests/` или в корне проекта. Приложение сначала ищет файл в `tests/.env.testing`, затем в корне проекта.
+## Файл tests/.env.testing
 
-Рекомендуемое расположение: `tests/.env.testing`
-
-Пример настройки файла:
+Обязателен и должен быть читаемым. Минимально:
 
 ```env
 APP_ENV=testing
-APP_DEBUG=true
+APP_KEY=base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
-# Настройки базы данных для тестов
-DB_CONNECTION=mysql
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_DATABASE=vk_utils_test
-DB_USERNAME=your_test_username
-DB_PASSWORD=your_test_password
+DB_CONNECTION=sqlite
+DB_DATABASE=:memory:
 
-# Настройки VK API для тестов (можно использовать тестовые значения)
+CACHE_DRIVER=array
 VK_TOKEN=test_token_for_unit_tests
 VK_API_VERSION=5.122
 VK_VERIFY_SSL=false
 VK_ACCOUNT_BASE_URL=https://vk.com
 ```
 
-## Создание тестовой базы данных
+Файл может быть в `.gitignore`; локальная копия обязательна для запуска тестов.
 
-Перед запуском тестов необходимо создать тестовую базу данных:
+## Подготовка схемы
 
-```bash
-mysql -u root -p
+Базовый `TestCase` **не** вызывает `migrate:fresh` и не очищает таблицы.
+Для работы с БД:
 
-CREATE DATABASE vk_utils_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
-# Создайте пользователя для тестов (опционально)
-CREATE USER 'vk_utils_test_user'@'localhost' IDENTIFIED BY 'test_password';
-GRANT ALL PRIVILEGES ON vk_utils_test.* TO 'vk_utils_test_user'@'localhost';
-FLUSH PRIVILEGES;
-```
-
-## Автоматическая очистка и миграции
-
-Тестовая база данных автоматически:
-- Очищается перед запуском всех тестов (один раз)
-- Миграции выполняются автоматически перед первым тестом
-- Все таблицы удаляются и создаются заново через `migrate:fresh`
-
-Это обеспечивает чистую базу данных для каждого запуска тестов.
-
-**Важно:** Миграции запускаются один раз при первом тесте. Если нужно полностью изолировать тесты, используйте трейт `RefreshDatabase` в отдельных тестах.
-
-## Запуск тестов
-
-```bash
-# Запуск всех тестов
-php artisan test
-
-# Или через PHPUnit
-vendor/bin/phpunit
-
-# Запуск только Unit тестов
-php artisan test --testsuite=Unit
-
-# Запуск только Feature тестов
-php artisan test --testsuite=Feature
-
-# Запуск конкретного теста
-php artisan test tests/Unit/Services/VkApi/VkGroupServiceTest.php
-```
-
-## Использование RefreshDatabase в тестах
-
-Для тестов, которые требуют работы с базой данных и полной изоляции, можно использовать трейт `RefreshDatabase`:
+- используйте `RefreshDatabase` в конкретном тестовом классе; или
+- поднимайте нужные таблицы вручную в `setUp` (как feature-тесты `vk_posts`).
 
 ```php
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -90,61 +53,49 @@ class MyTest extends TestCase
 
     public function test_something_with_database()
     {
-        // База данных будет автоматически очищена и миграции выполнены
-        // перед каждым тестом в этом классе
+        // миграции на SQLite :memory: перед тестом
     }
 }
 ```
 
-**Примечание:** `RefreshDatabase` запускает миграции перед каждым тестом, что может быть медленнее, чем общий подход с одним запуском миграций для всех тестов. Используйте его только когда необходимо полностью изолировать тесты друг от друга.
+## Запуск тестов
 
-## Использование DatabaseTransactions
+```bash
+# Все тесты
+vendor/bin/phpunit
 
-Для еще более быстрых тестов можно использовать `DatabaseTransactions`:
+# Или
+php artisan test
 
-```php
-use Illuminate\Foundation\Testing\DatabaseTransactions;
-use Tests\TestCase;
-
-class MyTest extends TestCase
-{
-    use DatabaseTransactions;
-
-    public function test_something_with_database()
-    {
-        // Все изменения в БД будут автоматически откачены после теста
-    }
-}
+# Отдельный файл (предпочтительно при отладке)
+vendor/bin/phpunit tests/Feature/PostsFindTest.php
+vendor/bin/phpunit tests/Unit/TestDatabaseIsolationTest.php
 ```
 
-Это быстрее, чем `RefreshDatabase`, так как не пересоздает таблицы, а просто откатывает транзакции.
+Даже если в shell экспортированы продовые `DB_*`, PHPUnit через `CreatesApplication`
+должен остаться на SQLite `:memory:`.
 
 ## Рекомендации
 
-1. **Используйте моки для внешних API** - большинство Unit тестов не требуют реальной БД
-2. **Используйте `RefreshDatabase` только когда необходимо** - для большинства тестов достаточно общего подхода
-3. **Держите тестовую БД отдельно** - никогда не используйте продакшн БД для тестов
-4. **Проверяйте .env.testing в .gitignore** - файл уже добавлен в `.gitignore`, чтобы не попасть в репозиторий
+1. Моки для внешних API — большинство unit-тестов не требуют БД.
+2. `RefreshDatabase` — только где нужна схема/данные.
+3. Не запускайте destructive SQL через `bootstrap/app.php` «для отладки тестов».
+4. Не используйте рабочую MySQL-базу как тестовую.
 
 ## Устранение проблем
 
-### Ошибка подключения к базе данных при тестах
+### Test database isolation failed
 
-Убедитесь, что:
-- Файл `.env.testing` существует и содержит правильные настройки БД
-- Тестовая база данных создана
-- Пользователь имеет права доступа к базе данных
+Сообщение значит, что после загрузки конфига подключение не SQLite `:memory:`.
+Проверьте:
 
-### Миграции не выполняются
+- существует и читается `tests/.env.testing`;
+- в нём `DB_CONNECTION=sqlite` и `DB_DATABASE=:memory:`;
+- нет непустого `DATABASE_URL` в итоговой конфигурации;
+- не подключён устаревший `bootstrap/cache/config.php` с настройками рабочей БД
+  (удалите кеш вручную в рабочем окружении; тесты кеш не перезаписывают).
 
-Если миграции не выполняются автоматически:
-- Проверьте, что в `.env.testing` указан правильный `DB_CONNECTION=mysql`
-- Убедитесь, что база данных доступна
-- Попробуйте запустить миграции вручную: `php artisan migrate --env=testing`
+### Миграции / таблицы отсутствуют
 
-### Тесты работают медленно
-
-Если тесты работают медленно:
-- Используйте `DatabaseTransactions` вместо `RefreshDatabase` где возможно
-- Используйте моки для внешних API вместо реальных запросов
-- Рассмотрите возможность использования SQLite in-memory для быстрых unit-тестов
+Базовый `TestCase` больше не мигрирует БД сам. Добавьте `RefreshDatabase`
+или создайте таблицы в `setUp` теста.

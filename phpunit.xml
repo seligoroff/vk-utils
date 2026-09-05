@@ -21,8 +21,8 @@
         <server name="APP_ENV" value="testing"/>
         <server name="BCRYPT_ROUNDS" value="4"/>
         <server name="CACHE_DRIVER" value="array"/>
-        <!-- Database configuration will be loaded from .env.testing -->
-        <!-- Remove DB_CONNECTION and DB_DATABASE to use values from .env.testing -->
+        <!-- Database: only from tests/.env.testing (CreatesApplication force-applies DB_* over shell).
+             Do not set DB_CONNECTION / DB_DATABASE here. -->
         <server name="MAIL_MAILER" value="array"/>
         <server name="QUEUE_CONNECTION" value="sync"/>
         <server name="SESSION_DRIVER" value="array"/>
