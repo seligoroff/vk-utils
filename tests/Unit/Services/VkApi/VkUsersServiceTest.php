@@ -2,6 +2,7 @@
 
 namespace Tests\Unit\Services\VkApi;
 
+use App\Services\VkApi\VkRequestException;
 use App\Services\VkApi\VkSdkAdapter;
 use App\Services\VkApi\VkUsersService;
 use Mockery;
@@ -104,6 +105,39 @@ class VkUsersServiceTest extends TestCase
         $this->assertArrayNotHasKey(101, $profiles);
         $this->assertArrayHasKey(201, $profiles);
         $this->assertArrayHasKey(250, $profiles);
+    }
+
+    public function test_stops_run_from_batch_is_propagated(): void
+    {
+        $call = 0;
+
+        $service = $this->makeServiceWithUsersApi(function (array $params) use (&$call) {
+            $call++;
+            if ($call === 2) {
+                throw new VkRequestException(
+                    'Flood control',
+                    VkRequestException::CATEGORY_FLOOD,
+                    9,
+                    false,
+                    true
+                );
+            }
+
+            return array_map(
+                fn (int $id) => ['id' => $id, 'screen_name' => "user{$id}"],
+                $params['user_ids']
+            );
+        });
+
+        try {
+            $service->getByIds(range(1, 250));
+            $this->fail('Expected VkRequestException');
+        } catch (VkRequestException $e) {
+            $this->assertTrue($e->stopsRun);
+            $this->assertSame(VkRequestException::CATEGORY_FLOOD, $e->category);
+        }
+
+        $this->assertSame(2, $call);
     }
 
     public function test_each_request_user_ids_count_does_not_exceed_limit(): void

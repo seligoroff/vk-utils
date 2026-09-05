@@ -50,7 +50,14 @@ class VkFriendsService
      * @param int $userId User ID
      * @param int $count Number of users to return (max 5000 per API call)
      * @param int $offset Offset for pagination
-     * @return array{friends:array<int>|null,error:string|null}
+     * @return array{
+     *   friends:?array<int>,
+     *   error:?string,
+     *   category:?string,
+     *   vk_code:?int,
+     *   stops_run:bool,
+     *   retryable:bool
+     * }
      */
     public function getFriendIdsWithError(int $userId, int $count = 5000, int $offset = 0): array
     {
@@ -66,23 +73,59 @@ class VkFriendsService
                         'offset' => $offset,
                     ]
                 );
-            }, "getting friends for user {$userId}");
+            }, "getting friends for user {$userId}", ['retry' => true]);
 
             if (!is_array($result)) {
-                return ['friends' => null, 'error' => 'Unexpected VK response format'];
+                return $this->errorResult(
+                    new VkRequestException(
+                        'Unexpected VK response format',
+                        VkRequestException::CATEGORY_UNEXPECTED_RESPONSE,
+                        null,
+                        false,
+                        true
+                    )
+                );
             }
 
             if (isset($result['items']) && is_array($result['items'])) {
-                return [
-                    'friends' => array_values(array_map('intval', $result['items'])),
-                    'error' => null,
-                ];
+                return $this->successResult(array_values(array_map('intval', $result['items'])));
             }
 
-            return ['friends' => [], 'error' => null];
-        } catch (\Exception $e) {
-            return ['friends' => null, 'error' => $e->getMessage()];
+            return $this->successResult([]);
+        } catch (\Throwable $e) {
+            return $this->errorResult(VkErrorClassifier::fromThrowable($e));
         }
+    }
+
+    /**
+     * @param array<int> $friends
+     * @return array{friends:array<int>,error:null,category:null,vk_code:null,stops_run:false,retryable:false}
+     */
+    private function successResult(array $friends): array
+    {
+        return [
+            'friends' => $friends,
+            'error' => null,
+            'category' => null,
+            'vk_code' => null,
+            'stops_run' => false,
+            'retryable' => false,
+        ];
+    }
+
+    /**
+     * @return array{friends:null,error:string,category:string,vk_code:?int,stops_run:bool,retryable:bool}
+     */
+    private function errorResult(VkRequestException $e): array
+    {
+        return [
+            'friends' => null,
+            'error' => $e->getMessage(),
+            'category' => $e->category,
+            'vk_code' => $e->vkCode,
+            'stops_run' => $e->stopsRun,
+            'retryable' => $e->retryable,
+        ];
     }
 }
 

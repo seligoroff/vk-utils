@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Services\VkApi\VkFriendsService;
 use App\Services\VkApi\VkLikesService;
+use App\Services\VkApi\VkRequestException;
 use App\Services\VkApi\VkUsersService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -11,6 +12,21 @@ use Illuminate\Support\Facades\Schema;
 
 class LikersCore extends Command
 {
+    private const TECHNICAL_FRIEND_CATEGORIES = [
+        'api',
+        'transport',
+        'rate_limit',
+        'flood',
+        'unexpected_response',
+    ];
+
+    private const HIDDEN_FRIEND_CATEGORIES = [
+        'privacy',
+        'access',
+    ];
+
+    private const TECHNICAL_STREAK_LIMIT = 5;
+
     /**
      * The name and signature of the console command.
      *
@@ -34,7 +50,11 @@ class LikersCore extends Command
      */
     protected $description = 'Вычисление ядра лайкнувших пост по дружеским связям между лайкнувшими';
 
-    public function handle(): int
+    public function handle(
+        VkLikesService $likesService,
+        VkFriendsService $friendsService,
+        VkUsersService $usersService
+    ): int
     {
         $owner = $this->option('owner');
         $postId = (int) $this->option('post');
@@ -69,20 +89,16 @@ class LikersCore extends Command
             return 1;
         }
 
-        $likesService = new VkLikesService();
-        $friendsService = new VkFriendsService();
-        $usersService = new VkUsersService();
-
         $postViews = DB::table('vk_posts')
             ->where('owner_id', $owner)
             ->where('post_id', $postId)
             ->value('views') ?? 0;
 
         $this->info("Получение лайкнувших пост {$owner}_{$postId}...");
-        $likers = $this->getAllLikers($likesService, $owner, $postId);
-        if ($likers === null) {
-            $this->error('Не удалось получить лайкнувших. Проверьте owner/post и права токена.');
-            return 1;
+        try {
+            $likers = $this->getAllLikers($likesService, $owner, $postId);
+        } catch (VkRequestException $e) {
+            return $this->failRunOnException($e, $format, $owner, $postId, (int) $postViews, $k, $maxUsers, $delay);
         }
         if (empty($likers)) {
             $this->warn('Лайков не найдено.');
@@ -105,6 +121,13 @@ class LikersCore extends Command
         $rows = [];
         $friendErrors = 0;
         $errorStats = [];
+        $errorCounts = [];
+        $runStatus = 'complete';
+        $stoppedBy = null;
+        $stopFriendsResult = null;
+        $skipFriendsResult = null;
+        $friendsCalls = 0;
+        $technicalStreak = 0;
 
         $this->info('Анализ дружеских связей...');
         $bar = $this->output->createProgressBar(count($likers));
@@ -113,12 +136,19 @@ class LikersCore extends Command
         $bar->start();
 
         foreach ($likers as $userId) {
+            $friendsCalls++;
             $friendsResult = $friendsService->getFriendIdsWithError((int) $userId);
             $friends = $friendsResult['friends'];
             $errorMessage = $friendsResult['error'];
+            $interpretation = $this->interpretFriendResult($friendsResult, $technicalStreak);
+            $technicalStreak = $interpretation['technical_streak'];
 
             if ($friends === null) {
                 $friendErrors++;
+                $errorCounts = $this->tallyErrorCategory(
+                    $interpretation['category'] ?? $friendsResult['category'] ?? null,
+                    $errorCounts
+                );
                 $errorKey = $this->normalizeErrorMessage($errorMessage);
                 if (!isset($errorStats[$errorKey])) {
                     $errorStats[$errorKey] = ['count' => 0, 'users' => []];
@@ -127,19 +157,46 @@ class LikersCore extends Command
                 if (count($errorStats[$errorKey]['users']) < 5) {
                     $errorStats[$errorKey]['users'][] = (int) $userId;
                 }
+            }
 
+            if ($interpretation['decision'] === 'stop') {
+                $runStatus = 'failed';
+                $stoppedBy = $interpretation['category'];
+                $stopFriendsResult = $friendsResult;
+                break;
+            }
+
+            if ($interpretation['decision'] === 'skip') {
+                $runStatus = 'failed';
+                if ($stoppedBy === null) {
+                    $stoppedBy = $interpretation['category'];
+                }
+                if ($skipFriendsResult === null) {
+                    $skipFriendsResult = $friendsResult;
+                }
+                $bar->advance();
+                if ($delay > 0) {
+                    usleep((int) ($delay * 1000000));
+                }
+                continue;
+            }
+
+            if ($interpretation['decision'] === 'hidden') {
                 $rows[] = [
                     'user_id' => (int) $userId,
                     'friends_in_likers_count' => 0,
                     'core_member' => false,
                     'friends_data_available' => false,
                     'error_message' => $errorMessage,
+                    'error_category' => $interpretation['category'],
                 ];
             } else {
                 $friendsInLikers = 0;
-                foreach ($friends as $friendId) {
-                    if (isset($likerSet[$friendId])) {
-                        $friendsInLikers++;
+                if (is_array($friends)) {
+                    foreach ($friends as $friendId) {
+                        if (isset($likerSet[$friendId])) {
+                            $friendsInLikers++;
+                        }
                     }
                 }
                 $rows[] = [
@@ -148,6 +205,7 @@ class LikersCore extends Command
                     'core_member' => $friendsInLikers >= $k,
                     'friends_data_available' => true,
                     'error_message' => null,
+                    'error_category' => null,
                 ];
             }
 
@@ -161,16 +219,19 @@ class LikersCore extends Command
         $bar->finish();
         $this->newLine(2);
 
-        if (!empty($errorStats)) {
-            $this->info('Причины ошибок friends.get:');
-            $errorRows = [];
-            foreach ($errorStats as $error => $meta) {
-                $errorRows[] = [$error, $meta['count']];
-            }
-            usort($errorRows, fn(array $a, array $b) => $b[1] <=> $a[1]);
-            $this->table(['Причина', 'Количество'], $errorRows);
+        if (!empty($errorCounts)) {
+            $this->info('Ошибки friends.get по категориям:');
+            $this->table(['Категория', 'Количество'], $this->formatCategoryCountRows($errorCounts));
 
-            if ($verboseErrors) {
+            if ($verboseErrors && !empty($errorStats)) {
+                $this->line('Детали по тексту ошибки:');
+                $errorRows = [];
+                foreach ($errorStats as $error => $meta) {
+                    $errorRows[] = [$error, $meta['count']];
+                }
+                usort($errorRows, fn(array $a, array $b) => $b[1] <=> $a[1]);
+                $this->table(['Причина', 'Количество'], $errorRows);
+
                 $this->line('Примеры user_id:');
                 foreach ($errorStats as $error => $meta) {
                     $this->line("  {$error}: " . implode(', ', $meta['users']));
@@ -180,60 +241,65 @@ class LikersCore extends Command
         }
 
         usort($rows, fn(array $a, array $b) => $b['friends_in_likers_count'] <=> $a['friends_in_likers_count']);
-        $coreUsers = array_values(array_filter($rows, fn(array $r) => $r['core_member']));
 
-        $allIds = array_map(fn(array $r) => (int) $r['user_id'], $rows);
         $withDemographics = (bool) $this->option('demographics');
-        $fields = $this->resolveProfileFields($withDemographics);
-        if ($withDemographics) {
-            $this->info('Получение профилей и демографических данных...');
-        }
+        $demographics = null;
+        $profiles = [];
+        $profilesMeta = $this->buildProfilesMeta(0, 0);
 
-        $profiles = $usersService->getByIds($allIds, $fields, $delay);
+        if ($this->shouldFetchProfiles($runStatus)) {
+            $allIds = array_map(fn(array $r) => (int) $r['user_id'], $rows);
+            $fields = $this->resolveProfileFields($withDemographics);
+            if ($withDemographics) {
+                $this->info('Получение профилей и демографических данных...');
+            }
 
-        $profilesMeta = $this->buildProfilesMeta(count($allIds), count($profiles));
-        $requested = $profilesMeta['requested'];
-        $received = $profilesMeta['received'];
-        if ($requested > 0 && $received / $requested < 0.9) {
-            $this->warn("Получено профилей: {$received} из {$requested}. Демография может быть смещена.");
+            try {
+                $profiles = $usersService->getByIds($allIds, $fields, $delay);
+                $profilesMeta = $this->buildProfilesMeta(count($allIds), count($profiles));
+                $requested = $profilesMeta['requested'];
+                $received = $profilesMeta['received'];
+                if ($requested > 0 && $received / $requested < 0.9) {
+                    $this->warn("Получено профилей: {$received} из {$requested}. Демография может быть смещена.");
+                }
+            } catch (VkRequestException $e) {
+                if (!$e->stopsRun) {
+                    throw $e;
+                }
+                $runStatus = 'failed';
+                $stoppedBy = $e->category;
+                $stopFriendsResult = [
+                    'error' => $e->getMessage(),
+                    'category' => $e->category,
+                    'vk_code' => $e->vkCode,
+                ];
+                $errorCounts = $this->tallyErrorCategory($e->category, $errorCounts);
+                $profiles = [];
+                $profilesMeta = $this->buildProfilesMeta(0, 0);
+            }
         }
 
         $rows = $this->enrichRowsWithProfiles($rows, $profiles);
         $coreUsers = array_values(array_filter($rows, fn(array $r) => $r['core_member']));
 
-        $demographics = null;
-        if ($withDemographics) {
+        if ($this->shouldComputeDemographics($runStatus, $withDemographics)) {
             $demographics = $this->computeDemographics($rows, $profiles, $k);
         }
 
-        // Сохраняем сегменты для продольного анализа (core-transitions)
-        if (Schema::hasTable('user_post_segments')) {
-            $segments = [];
-            foreach ($rows as $r) {
-                $seg = 'open';
-                if (isset($r['core_member']) && $r['core_member']) {
-                    $seg = 'core';
-                } elseif (!$r['friends_data_available']) {
-                    $seg = 'hidden';
-                }
-                $segments[] = [
-                    'user_id' => $r['user_id'],
-                    'owner_id' => $owner,
-                    'post_id' => $postId,
-                    'segment' => $seg,
-                    'friends_in_likers_count' => $r['friends_in_likers_count'] ?? 0,
-                ];
-            }
-            DB::table('user_post_segments')->upsert(
-                $segments,
-                ['owner_id', 'post_id', 'user_id'],
-                ['segment', 'friends_in_likers_count']
+        $this->persistSegmentsIfComplete($runStatus, $owner, $postId, $rows);
+        if ($runStatus === 'failed') {
+            $this->warn(
+                $this->formatUnsavedSegmentsWarning(
+                    $stopFriendsResult ?? $skipFriendsResult ?? [],
+                    $friendsCalls
+                )
             );
         }
 
         $result = [
             'post' => ['owner_id' => $owner, 'post_id' => $postId, 'views' => $postViews],
             'settings' => ['k' => $k, 'max_users' => $maxUsers, 'delay' => $delay],
+            'run' => $this->buildRunMeta($runStatus, $errorCounts, $stoppedBy),
             'summary' => [
                 'total_likers' => $totalLikers,
                 'analyzed_likers' => $analyzedLikers,
@@ -250,40 +316,19 @@ class LikersCore extends Command
             'demographics' => $demographics,
         ];
 
-        $outputPath = $this->option('output');
-        if ($outputPath) {
-            $saveFormat = $this->resolveFormatForOutput($format, (string) $outputPath);
-            $content = $this->formatForFile($result, $saveFormat);
-            $finalPath = $this->resolvePath((string) $outputPath);
-
-            $dir = dirname($finalPath);
-            if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
-                $this->error("Не удалось создать директорию: {$dir}");
-                return 1;
-            }
-
-            $bytes = file_put_contents($finalPath, $content);
-            if ($bytes === false) {
-                $this->error("Ошибка при сохранении файла: {$finalPath}");
-                return 1;
-            }
-
-            $this->info("Результаты сохранены в файл: {$finalPath} ({$bytes} байт)");
-            if ($format === 'table') {
-                $this->displayTable($result);
-            }
-        } else {
-            if ($format === 'table') {
-                $this->displayTable($result);
-            } else {
-                $this->line($this->formatNonTable($result, $format));
-            }
+        $outputWritten = $this->writeAndDisplayResult($result, $format);
+        if (!$outputWritten) {
+            return 1;
         }
 
-        return 0;
+        return $runStatus === 'complete' ? 0 : 1;
     }
 
-    private function getAllLikers(VkLikesService $likesService, string $owner, int $postId): ?array
+    /**
+     * @return array<int>
+     * @throws VkRequestException
+     */
+    private function getAllLikers(VkLikesService $likesService, string $owner, int $postId): array
     {
         $offset = 0;
         $count = 1000;
@@ -293,9 +338,6 @@ class LikersCore extends Command
 
         while (true) {
             $chunk = $likesService->getPostLikers($owner, $postId, $count, $offset);
-            if ($chunk === null) {
-                return null;
-            }
             if ($totalCount === null) {
                 $totalCount = (int) ($chunk['total_count'] ?? 0);
             }
@@ -326,6 +368,88 @@ class LikersCore extends Command
         return $all;
     }
 
+    private function failRunOnException(
+        VkRequestException $e,
+        string $format,
+        $owner,
+        int $postId,
+        int $postViews,
+        int $k,
+        int $maxUsers,
+        float $delay
+    ): int {
+        $stop = [
+            'error' => $e->getMessage(),
+            'category' => $e->category,
+            'vk_code' => $e->vkCode,
+        ];
+        $reason = $this->formatStoppedReason($stop);
+        $this->error("Не удалось получить лайкнувших: {$reason}.");
+        $this->warn($this->formatUnsavedSegmentsWarning($stop, 0));
+
+        $errorCounts = $this->tallyErrorCategory($e->category, []);
+        $result = [
+            'post' => ['owner_id' => $owner, 'post_id' => $postId, 'views' => $postViews],
+            'settings' => ['k' => $k, 'max_users' => $maxUsers, 'delay' => $delay],
+            'run' => $this->buildRunMeta('failed', $errorCounts, $e->category),
+            'summary' => [
+                'total_likers' => 0,
+                'analyzed_likers' => 0,
+                'omitted_likers' => 0,
+                'sample_coverage_percent' => 100.0,
+                'sample_truncated' => false,
+                'core_users_count' => 0,
+                'friend_data_errors' => 0,
+                'friend_error_types' => [],
+            ],
+            'profiles' => $this->buildProfilesMeta(0, 0),
+            'core_users' => [],
+            'users' => [],
+            'demographics' => null,
+        ];
+
+        $this->writeAndDisplayResult($result, $format);
+
+        return 1;
+    }
+
+    private function writeAndDisplayResult(array $result, string $format): bool
+    {
+        $outputPath = $this->option('output');
+        if ($outputPath) {
+            $saveFormat = $this->resolveFormatForOutput($format, (string) $outputPath);
+            $content = $this->formatForFile($result, $saveFormat);
+            $finalPath = $this->resolvePath((string) $outputPath);
+
+            $dir = dirname($finalPath);
+            if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
+                $this->error("Не удалось создать директорию: {$dir}");
+                return false;
+            }
+
+            $bytes = file_put_contents($finalPath, $content);
+            if ($bytes === false) {
+                $this->error("Ошибка при сохранении файла: {$finalPath}");
+                return false;
+            }
+
+            $this->info("Результаты сохранены в файл: {$finalPath} ({$bytes} байт)");
+            if ($format === 'table') {
+                $this->displayTable($result);
+            }
+
+            return true;
+        }
+
+        if ($format === 'table') {
+            $this->displayTable($result);
+        } else {
+            $this->line($this->formatNonTable($result, $format));
+        }
+
+        return true;
+    }
+
     private function displayTable(array $result): void
     {
         $summary = $result['summary'];
@@ -345,7 +469,8 @@ class LikersCore extends Command
             );
         }
 
-        $this->table(['Показатель', 'Значение'], [
+        $run = $result['run'] ?? ['status' => 'complete', 'error_counts' => [], 'stopped_by' => null];
+        $runRows = [
             ['Всего лайкнувших', $summary['total_likers'] ?? $summary['analyzed_likers']],
             ['Лайкнувших проанализировано', $summary['analyzed_likers']],
             ['Не обработано', $summary['omitted_likers'] ?? 0],
@@ -354,7 +479,13 @@ class LikersCore extends Command
             ['ERv (лайки / просмотры)', $erv],
             ['Пользователей в ядре', $summary['core_users_count']],
             ['Ошибок чтения друзей', $summary['friend_data_errors']],
-        ]);
+            ['Статус прогона', $run['status']],
+        ];
+        if (($run['stopped_by'] ?? null) !== null) {
+            $runRows[] = ['Остановлен из-за', $run['stopped_by']];
+        }
+
+        $this->table(['Показатель', 'Значение'], $runRows);
 
         if (empty($result['core_users'])) {
             $this->warn('Ядро пустое по выбранному порогу.');
@@ -427,7 +558,8 @@ class LikersCore extends Command
         if (!empty($summary['sample_truncated'])) {
             $out .= "- Внимание: обработаны первые {$summary['analyzed_likers']} лайкнувших (порядок API), это не гарантированно случайная выборка.\n";
         }
-        $out .= "- Пользователей в ядре: `{$summary['core_users_count']}`\n\n";
+        $out .= "- Пользователей в ядре: `{$summary['core_users_count']}`\n";
+        $out .= $this->formatRunStatusLines($result, true) . "\n";
         $out .= "| user_id | name | screen_name | friends_in_likers_count | friends_data_available |\n";
         $out .= "|---:|---|---|---:|---:|\n";
         foreach ($result['core_users'] as $r) {
@@ -453,7 +585,8 @@ class LikersCore extends Command
             $out .= "Внимание: обработаны первые {$summary['analyzed_likers']} лайкнувших (порядок API), это не гарантированно случайная выборка.\n";
         }
         $out .= "Пользователей в ядре: {$summary['core_users_count']}\n";
-        $out .= "Ошибок чтения друзей: {$summary['friend_data_errors']}\n\n";
+        $out .= "Ошибок чтения друзей: {$summary['friend_data_errors']}\n";
+        $out .= $this->formatRunStatusLines($result, false) . "\n";
         foreach ($result['core_users'] as $r) {
             $out .= "- user_id={$r['user_id']}, name={$r['display_name']}, screen_name=" . ($r['screen_name'] ?: '-') . ", friends_in_likers_count={$r['friends_in_likers_count']}, friends_data_available=" . ($r['friends_data_available'] ? '1' : '0') . "\n";
         }
@@ -484,6 +617,216 @@ class LikersCore extends Command
             return $path;
         }
         return base_path($path);
+    }
+
+    /**
+     * @param array<string, int> $errorCounts
+     * @return array<string, int>
+     */
+    private function tallyErrorCategory(?string $category, array $errorCounts): array
+    {
+        $key = $category ?: 'unknown';
+        $errorCounts[$key] = ($errorCounts[$key] ?? 0) + 1;
+
+        return $errorCounts;
+    }
+
+    /**
+     * @param array<string, int> $errorCounts
+     * @return array{status:'complete'|'failed', error_counts:array<string, int>, stopped_by:?string}
+     */
+    private function buildRunMeta(string $status, array $errorCounts, ?string $stoppedBy): array
+    {
+        $status = $status === 'complete' ? 'complete' : 'failed';
+        ksort($errorCounts);
+
+        return [
+            'status' => $status,
+            'error_counts' => $errorCounts,
+            'stopped_by' => $stoppedBy,
+        ];
+    }
+
+    /**
+     * @param array{error:?string, vk_code?:?int, category?:?string} $friendsResult
+     */
+    private function formatStoppedReason(array $friendsResult): string
+    {
+        $message = trim((string) ($friendsResult['error'] ?? ''));
+        $category = $friendsResult['category'] ?? null;
+        if ($message === '') {
+            $message = $category ?: 'unknown';
+        }
+
+        $vkCode = $friendsResult['vk_code'] ?? null;
+        if (is_int($vkCode) && !preg_match('/код\s+\d+/u', $message)) {
+            return "{$message} (код {$vkCode})";
+        }
+
+        return $message;
+    }
+
+    /**
+     * @param array{error:?string, vk_code?:?int, category?:?string} $friendsResult
+     */
+    private function formatUnsavedSegmentsWarning(array $friendsResult, int $processedCount): string
+    {
+        $reason = $this->formatStoppedReason($friendsResult);
+
+        return "Сегменты не сохранены: {$reason}. Прогон остановлен после {$processedCount} пользователей.";
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rows
+     */
+    private function persistSegmentsIfComplete(string $runStatus, $owner, int $postId, array $rows): void
+    {
+        if ($runStatus !== 'complete' || !Schema::hasTable('user_post_segments')) {
+            return;
+        }
+
+        $segments = $this->buildSegmentRows($rows, $owner, $postId);
+        if ($segments === []) {
+            return;
+        }
+
+        DB::transaction(function () use ($segments) {
+            DB::table('user_post_segments')->upsert(
+                $segments,
+                ['owner_id', 'post_id', 'user_id'],
+                ['segment', 'friends_in_likers_count']
+            );
+        });
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, array{user_id:int, owner_id:mixed, post_id:int, segment:string, friends_in_likers_count:int}>
+     */
+    private function buildSegmentRows(array $rows, $owner, int $postId): array
+    {
+        $segments = [];
+        foreach ($rows as $r) {
+            $seg = $this->resolveSegment($r);
+            $segments[] = [
+                'user_id' => $r['user_id'],
+                'owner_id' => $owner,
+                'post_id' => $postId,
+                'segment' => $seg,
+                'friends_in_likers_count' => $r['friends_in_likers_count'] ?? 0,
+            ];
+        }
+
+        return $segments;
+    }
+
+    private function formatRunStatusLines(array $result, bool $markdown): string
+    {
+        $run = $result['run'] ?? ['status' => 'complete', 'error_counts' => [], 'stopped_by' => null];
+        $status = $run['status'] ?? 'complete';
+        $stoppedBy = $run['stopped_by'] ?? null;
+
+        if ($markdown) {
+            $lines = "- Статус прогона: `{$status}`\n";
+            if ($stoppedBy !== null) {
+                $lines .= "- Остановлен из-за: `{$stoppedBy}`\n";
+            }
+            return $lines;
+        }
+
+        $lines = "Статус прогона: {$status}\n";
+        if ($stoppedBy !== null) {
+            $lines .= "Остановлен из-за: {$stoppedBy}\n";
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Решение по одному ответу friends.get: стоп, hidden, пропуск или обычный подсчёт.
+     *
+     * @param array{friends:?array, error:?string, category:?string, stops_run?:bool} $friendsResult
+     * @return array{decision:'stop'|'hidden'|'skip'|'ok', technical_streak:int, category:?string}
+     */
+    private function interpretFriendResult(array $friendsResult, int $technicalStreak): array
+    {
+        $category = $friendsResult['category'] ?? null;
+
+        if ($friendsResult['stops_run'] ?? false) {
+            return [
+                'decision' => 'stop',
+                'technical_streak' => $technicalStreak,
+                'category' => $category,
+            ];
+        }
+
+        if (in_array($category, self::HIDDEN_FRIEND_CATEGORIES, true)) {
+            return [
+                'decision' => 'hidden',
+                'technical_streak' => 0,
+                'category' => $category,
+            ];
+        }
+
+        $friends = $friendsResult['friends'] ?? null;
+        if ($friends === null && in_array($category, self::TECHNICAL_FRIEND_CATEGORIES, true)) {
+            $streak = $technicalStreak + 1;
+            if ($streak >= self::TECHNICAL_STREAK_LIMIT) {
+                return [
+                    'decision' => 'stop',
+                    'technical_streak' => $streak,
+                    'category' => $category,
+                ];
+            }
+
+            return [
+                'decision' => 'skip',
+                'technical_streak' => $streak,
+                'category' => $category,
+            ];
+        }
+
+        return [
+            'decision' => 'ok',
+            'technical_streak' => 0,
+            'category' => $category,
+        ];
+    }
+
+    /**
+     * @return 'core'|'hidden'|'open'
+     */
+    private function resolveSegment(array $row): string
+    {
+        if (!empty($row['core_member'])) {
+            return 'core';
+        }
+
+        $available = (bool) ($row['friends_data_available'] ?? false);
+        $category = $row['error_category'] ?? null;
+        if (!$available && in_array($category, self::HIDDEN_FRIEND_CATEGORIES, true)) {
+            return 'hidden';
+        }
+
+        return 'open';
+    }
+
+    /**
+     * @param array<string, int> $errorCounts
+     * @return array<int, array{0:string,1:int}>
+     */
+    private function formatCategoryCountRows(array $errorCounts): array
+    {
+        $rows = [];
+        foreach ($errorCounts as $category => $count) {
+            $rows[] = [(string) $category, (int) $count];
+        }
+        usort($rows, function (array $a, array $b): int {
+            $byCount = $b[1] <=> $a[1];
+            return $byCount !== 0 ? $byCount : $a[0] <=> $b[0];
+        });
+
+        return $rows;
     }
 
     /**
@@ -559,6 +902,16 @@ class LikersCore extends Command
         ];
     }
 
+    private function shouldFetchProfiles(string $runStatus): bool
+    {
+        return $runStatus === 'complete';
+    }
+
+    private function shouldComputeDemographics(string $runStatus, bool $requested): bool
+    {
+        return $runStatus === 'complete' && $requested;
+    }
+
     /**
      * @return array<int, string>
      */
@@ -615,13 +968,7 @@ class LikersCore extends Command
 
         foreach ($rows as $r) {
             $uid = (int) $r['user_id'];
-            if ($r['core_member']) {
-                $segments['core'][] = $uid;
-            } elseif (!$r['friends_data_available']) {
-                $segments['hidden'][] = $uid;
-            } else {
-                $segments['open'][] = $uid;
-            }
+            $segments[$this->resolveSegment($r)][] = $uid;
         }
 
         // Проверка целостности: сегменты взаимоисключающие, покрывают всех

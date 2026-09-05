@@ -171,28 +171,85 @@ class VkSdkAdapter
 
     /**
      * Execute a method with error handling
-     * 
-     * This is a helper method that wraps SDK calls with common error handling.
-     * It converts SDK exceptions into more user-friendly exceptions.
-     * 
+     *
      * @param callable $callback Function that makes SDK call
      * @param string|null $context Context for error messages (e.g., "getting wall posts")
+     * @param array{retry?:bool,max_attempts?:int,wait?:bool} $options
      * @return mixed
-     * @throws \Exception
+     * @throws VkRequestException
      */
-    public function execute(callable $callback, ?string $context = null)
+    public function execute(callable $callback, ?string $context = null, array $options = []): mixed
     {
-        try {
-            return $callback();
-        } catch (\VK\Exceptions\VKApiException $e) {
-            $context = $context ? " ($context)" : '';
-            throw new \Exception("VK API Error{$context}: " . $e->getMessage(), $e->getCode(), $e);
-        } catch (\VK\Exceptions\VKClientException $e) {
-            $context = $context ? " ($context)" : '';
-            throw new \Exception("VK Client Error{$context}: " . $e->getMessage(), $e->getCode(), $e);
-        } catch (\Exception $e) {
-            throw $e;
+        if (VkApiGuard::blocked()) {
+            throw VkApiGuard::blockedException($context);
         }
+
+        $retry = (bool) ($options['retry'] ?? false);
+        $maxAttempts = $retry ? max(1, (int) ($options['max_attempts'] ?? 3)) : 1;
+        $wait = array_key_exists('wait', $options) ? (bool) $options['wait'] : true;
+
+        $attempt = 0;
+        while ($attempt < $maxAttempts) {
+            $attempt++;
+
+            try {
+                return $callback();
+            } catch (\Throwable $e) {
+                $err = $this->withContext(VkErrorClassifier::fromThrowable($e), $context);
+
+                if ($err->stopsRun) {
+                    VkApiGuard::block($err, $this->token);
+                    throw $err;
+                }
+
+                if ($retry && $err->retryable && $attempt < $maxAttempts) {
+                    if ($wait) {
+                        usleep($this->backoffMicroseconds($attempt));
+                    }
+                    continue;
+                }
+
+                throw $err;
+            }
+        }
+
+        throw new VkRequestException(
+            'VK API request failed',
+            VkRequestException::CATEGORY_API,
+            null,
+            false,
+            false
+        );
+    }
+
+    private function withContext(VkRequestException $err, ?string $context): VkRequestException
+    {
+        if ($context === null || $context === '') {
+            return $err;
+        }
+
+        $suffix = " ({$context})";
+        if (str_contains($err->getMessage(), $suffix)) {
+            return $err;
+        }
+
+        return new VkRequestException(
+            $err->getMessage().$suffix,
+            $err->category,
+            $err->vkCode,
+            $err->retryable,
+            $err->stopsRun,
+            $err
+        );
+    }
+
+    private function backoffMicroseconds(int $failedAttempt): int
+    {
+        $base = 0.4 * (2 ** ($failedAttempt - 1));
+        $jitter = 0.8 + (mt_rand(0, 40) / 100);
+        $seconds = min(2.0, $base * $jitter);
+
+        return (int) round($seconds * 1_000_000);
     }
 }
 

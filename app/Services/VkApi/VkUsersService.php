@@ -66,8 +66,14 @@ class VkUsersService
                             'fields' => $fields,
                         ]
                     );
-                }, 'getting users profiles');
-            } catch (\Exception $e) {
+                }, 'getting users profiles', ['retry' => true]);
+            } catch (\Throwable $e) {
+                $err = $e instanceof VkRequestException
+                    ? $e
+                    : VkErrorClassifier::fromThrowable($e);
+                if ($err->stopsRun) {
+                    throw $err;
+                }
                 continue;
             }
 

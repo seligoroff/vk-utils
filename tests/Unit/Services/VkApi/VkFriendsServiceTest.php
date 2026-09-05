@@ -3,6 +3,7 @@
 namespace Tests\Unit\Services\VkApi;
 
 use App\Services\VkApi\VkFriendsService;
+use App\Services\VkApi\VkRequestException;
 use App\Services\VkApi\VkSdkAdapter;
 use Mockery;
 use Tests\TestCase;
@@ -46,6 +47,8 @@ class VkFriendsServiceTest extends TestCase
 
         $this->assertSame([10, 20], $result['friends']);
         $this->assertNull($result['error']);
+        $this->assertNull($result['category']);
+        $this->assertFalse($result['stops_run']);
     }
 
     public function test_returns_empty_array_when_no_items(): void
@@ -63,6 +66,8 @@ class VkFriendsServiceTest extends TestCase
 
         $this->assertSame([], $result['friends']);
         $this->assertNull($result['error']);
+        $this->assertNull($result['category']);
+        $this->assertFalse($result['stops_run']);
     }
 
     public function test_returns_null_and_error_on_unexpected_response_format(): void
@@ -80,6 +85,9 @@ class VkFriendsServiceTest extends TestCase
 
         $this->assertNull($result['friends']);
         $this->assertSame('Unexpected VK response format', $result['error']);
+        $this->assertSame(VkRequestException::CATEGORY_UNEXPECTED_RESPONSE, $result['category']);
+        $this->assertTrue($result['stops_run']);
+        $this->assertFalse($result['retryable']);
     }
 
     public function test_returns_null_and_error_on_api_exception(): void
@@ -97,5 +105,57 @@ class VkFriendsServiceTest extends TestCase
 
         $this->assertNull($result['friends']);
         $this->assertSame('VK API Error: Access denied', $result['error']);
+        $this->assertSame(VkRequestException::CATEGORY_API, $result['category']);
+        $this->assertFalse($result['stops_run']);
+    }
+
+    public function test_privacy_error_does_not_stop_the_run(): void
+    {
+        $mockAdapter = Mockery::mock(VkSdkAdapter::class);
+        $mockAdapter->shouldReceive('getToken')->andReturn('test_token');
+        $mockAdapter->shouldReceive('execute')
+            ->once()
+            ->andThrow(new VkRequestException(
+                'This profile is private',
+                VkRequestException::CATEGORY_PRIVACY,
+                30
+            ));
+
+        $service = new VkFriendsService();
+        $service->setAdapter($mockAdapter);
+
+        $result = $service->getFriendIdsWithError(12345);
+
+        $this->assertNull($result['friends']);
+        $this->assertSame(VkRequestException::CATEGORY_PRIVACY, $result['category']);
+        $this->assertSame(30, $result['vk_code']);
+        $this->assertFalse($result['stops_run']);
+        $this->assertFalse($result['retryable']);
+    }
+
+    public function test_flood_error_stops_the_run(): void
+    {
+        $mockAdapter = Mockery::mock(VkSdkAdapter::class);
+        $mockAdapter->shouldReceive('getToken')->andReturn('test_token');
+        $mockAdapter->shouldReceive('execute')
+            ->once()
+            ->andThrow(new VkRequestException(
+                'Flood control',
+                VkRequestException::CATEGORY_FLOOD,
+                9,
+                false,
+                true
+            ));
+
+        $service = new VkFriendsService();
+        $service->setAdapter($mockAdapter);
+
+        $result = $service->getFriendIdsWithError(12345);
+
+        $this->assertNull($result['friends']);
+        $this->assertSame(VkRequestException::CATEGORY_FLOOD, $result['category']);
+        $this->assertSame(9, $result['vk_code']);
+        $this->assertTrue($result['stops_run']);
+        $this->assertFalse($result['retryable']);
     }
 }

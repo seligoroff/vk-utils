@@ -37,9 +37,10 @@ class VkLikesService
      * @param int $postId Post ID
      * @param int $count Number of users to return (max 1000 per API call)
      * @param int $offset Offset for pagination
-     * @return array{total_count:int,user_ids:array<int>}|null
+     * @return array{total_count:int,user_ids:array<int>}
+     * @throws VkRequestException
      */
-    public function getPostLikers($ownerId, int $postId, int $count = 1000, int $offset = 0): ?array
+    public function getPostLikers($ownerId, int $postId, int $count = 1000, int $offset = 0): array
     {
         $adapter = $this->getAdapter();
 
@@ -57,10 +58,16 @@ class VkLikesService
                         'offset' => $offset,
                     ]
                 );
-            }, "getting post likers for {$ownerId}_{$postId}");
+            }, "getting post likers for {$ownerId}_{$postId}", ['retry' => true]);
 
             if (!is_array($result)) {
-                return null;
+                throw new VkRequestException(
+                    'Unexpected VK response format',
+                    VkRequestException::CATEGORY_UNEXPECTED_RESPONSE,
+                    null,
+                    false,
+                    true
+                );
             }
 
             $totalCount = isset($result['count']) ? (int) $result['count'] : 0;
@@ -71,9 +78,10 @@ class VkLikesService
                 'total_count' => $totalCount,
                 'user_ids' => $userIds,
             ];
-        } catch (\Exception $e) {
-            return null;
+        } catch (VkRequestException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            throw VkErrorClassifier::fromThrowable($e);
         }
     }
 }
-
