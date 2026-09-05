@@ -77,6 +77,16 @@ php artisan vk:posts-list --owner=-12345678 --from=2026-06-01 --to=2026-09-01 --
 php artisan vk:posts-list --owner=-12345678 --from=2026-06-01 --to=2026-09-01 --format=markdown --full-text --output=reports/posts.md
 ```
 
+## Поиск сохранённых постов
+
+```bash
+# Точечный lookup по стене и ID VK
+php artisan vk:posts-find --owner=-2507736 --post-id=25182
+
+# Поиск по фрагменту текста в уже загруженных постах
+php artisan vk:posts-find --owner=-2507736 --text="памятник" --from=2026-03-03 --to=2026-09-04 --format=json
+```
+
 ## Массовое получение постов для всех групп
 
 ```bash

@@ -7,6 +7,9 @@
 
 ## [Unreleased]
 
+### Добавлено
+- `vk:posts-find` — поиск сохранённых постов в `vk_posts` по `--db-id`, `--post-id` и/или `--text` без VK API
+
 ### Исправлено
 - Тестовая инфраструктура принудительно использует SQLite `:memory:` из `tests/.env.testing` поверх shell/`DATABASE_URL`; отказ до SQL при нарушении изоляции; из базового `TestCase` убраны `migrate:fresh` и очистка таблиц
 
